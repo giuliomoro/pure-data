@@ -52,6 +52,9 @@ static int alsa_buf_samps;
 static snd_pcm_status_t *alsa_status; 
 static int alsa_usemmap;
 
+static int alsa_maudio_count = 0;
+#define ALSA_MAUDIO_DROP 13408 /* was (64*209) ... was (13*1024) */
+
 t_alsa_dev alsa_indev[ALSA_MAXDEV];
 t_alsa_dev alsa_outdev[ALSA_MAXDEV];
 int alsa_nindev;
@@ -250,6 +253,7 @@ int alsa_open_audio(int naudioindev, int *audioindev, int nchindev,
     int frag_size = (sys_blocksize ? sys_blocksize : ALSA_DEFFRAGSIZE);
     int nfrags, i, iodev, dev2;
     int wantinchans, wantoutchans, device;
+    alsa_maudio_count = 0;
 
     nfrags = sys_schedadvance * (float)rate / (1e6 * frag_size);
         /* save our belief as to ALSA's buffer size for later */
@@ -442,6 +446,8 @@ int alsa_send_dacs(void)
         if (snd_pcm_status_get_avail(alsa_status) < transfersize)
             return SENDDACS_NO;
     }
+    alsa_maudio_count += transfersize;
+
     /* do output */
     for (iodev = 0, fp1 = sys_soundout, ch = 0; iodev < alsa_noutdev; iodev++)
     {
@@ -505,9 +511,9 @@ int alsa_send_dacs(void)
                     ((t_alsa_sample16 *)alsa_snd_buf)[j] = 0;
         }
         result = snd_pcm_writei(alsa_outdev[iodev].a_handle, alsa_snd_buf,
-            transfersize);
+            transfersize - (alsa_maudio_count >= ALSA_MAUDIO_DROP));
 
-        if (result != (int)transfersize)
+        if (result != (int)transfersize - (alsa_maudio_count >= ALSA_MAUDIO_DROP))
         {
     #ifdef DEBUG_ALSA_XFER
             if (result >= 0 || errno == EAGAIN)
@@ -607,6 +613,8 @@ int alsa_send_dacs(void)
 #ifdef DEBUG_ALSA_XFER
     xferno++;
 #endif
+    if (alsa_maudio_count >= ALSA_MAUDIO_DROP)
+        alsa_maudio_count -= ALSA_MAUDIO_DROP;
     if (sys_getrealtime() - timenow > 0.002)
     {
 #ifdef DEBUG_ALSA_XFER
