@@ -238,6 +238,6 @@ void pique_setup(void)
     class_addlist(pique_class, pique_list);
     class_addmethod(pique_class, (t_method)pique_errthresh,
         gensym("errthresh"), A_FLOAT, 0);
-    post("pique 0.1 for PD version 23");
+    // post("pique 0.1 for PD version 23");
 }
 
