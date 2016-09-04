@@ -9,6 +9,9 @@
     implement block ("-b") mode
 */
 
+#include <native/task.h>
+#include <sched.h>
+#include <pthread.h>
 #ifdef PD
 #include "m_pd.h"
 #endif
@@ -22,6 +25,7 @@ typedef double t_floatarg;
 #define t_resizebytes(a, b, c) t_resizebytes((char *)(a), (b), (c))
 #endif
 
+static t_float *bigbuf = NULL;
 /* From here to the next "#ifdef PD" or "#ifdef Max" should be extractable
 and usable in other contexts.  The one external requirement is a real
 single-precision FFT, invoked as in the Mayer one: */
@@ -256,7 +260,6 @@ static void sigmund_getrawpeaks(int npts, t_float *insamps,
     int peakcount = 0;
     t_float *fp1, *fp2;
     t_float *rawreal, *rawimag, *maskbuf, *powbuf;
-    t_float *bigbuf = alloca(sizeof (t_float ) * (2*NEGBINS + 6*npts));
     int maxbin = hifreq/fperbin;
     if (maxbin > npts - NEGBINS)
         maxbin = npts - NEGBINS;
@@ -974,7 +977,14 @@ static void sigmund_minpower(t_sigmund *x, t_floatarg f)
 static void sigmund_doit(t_sigmund *x, int npts, t_float *arraypoints,
     int loud, t_float srate)
 {
-    t_peak *peakv = (t_peak *)alloca(sizeof(t_peak) * x->x_npeak);
+	static int _npts = -1;
+	if(bigbuf == NULL || _npts != npts){
+		_npts = npts;
+		free(bigbuf);
+        printf("allocating\n");
+        bigbuf = (float*)calloc(1, sizeof (t_float ) * (2*NEGBINS + 6*npts));
+	}
+	t_peak *peakv = (t_peak *)alloca(sizeof(t_peak) * x->x_npeak);
     int nfound, i, cnt;
     t_float freq = 0, power, note = 0;
     sigmund_getrawpeaks(npts, arraypoints, x->x_npeak, peakv,
@@ -1058,8 +1068,13 @@ static void sigmund_print(t_sigmund *x)
     x->x_loud = 1;
 }
 
+static pthread_t sigmund_doit_thread;
+static int gShouldStop = 0;
+static int gShouldDoIt = 0;
+
 static void sigmund_free(t_sigmund *x)
 {
+    printf("Freeing sigmund\n");
     if (x->x_inbuf)
     {
         freebytes(x->x_inbuf, x->x_npts * sizeof(*x->x_inbuf));
@@ -1070,6 +1085,11 @@ static void sigmund_free(t_sigmund *x)
     if (x->x_trackv)
         freebytes(x->x_trackv, x->x_ntrack * sizeof(*x->x_trackv));
     clock_free(x->x_clock);
+    gShouldStop = 1;
+    void* value_ptr;
+    pthread_join(sigmund_doit_thread, &value_ptr);
+    printf("sigmund did it %d times\n", value_ptr);
+	free(bigbuf);
 }
 
 #endif /* PD or MSP */
@@ -1089,11 +1109,30 @@ static void sigmund_stabletime(t_sigmund *x, t_floatarg f);
 static void sigmund_growth(t_sigmund *x, t_floatarg f);
 static void sigmund_minpower(t_sigmund *x, t_floatarg f);
 
+t_sigmund* gX;
+static int count = 0;
+static void* sigmund_doit_loop(void* null){
+    while(!gShouldStop){
+        RTIME sleepTime = 1000000;
+        while(gShouldDoIt == 0){
+            rt_task_sleep(sleepTime);
+        }
+        if(gShouldDoIt > 1)
+            printf("sigmund skipped: %d computations\n", gShouldDoIt - 1);
+        gShouldDoIt = 0;
+        t_sigmund* x = gX;
+        sigmund_doit(x, x->x_npts, x->x_inbuf, x->x_loud, x->x_sr);
+        ++count;
+    }
+    pthread_exit(&count);
+}
+
 static void sigmund_tick(t_sigmund *x)
 {
     if (x->x_infill == x->x_npts)
     {
-        sigmund_doit(x, x->x_npts, x->x_inbuf, x->x_loud, x->x_sr);
+        gX = x;
+        gShouldDoIt++;
         if (x->x_hop >= x->x_npts)
         {
             x->x_infill = 0;
@@ -1287,6 +1326,24 @@ static void *sigmund_new(t_symbol *s, int argc, t_atom *argv)
     sigmund_npts(x, x->x_npts);
     notefinder_init(&x->x_notefinder);
     sigmund_clear(x);
+    int ret;
+    ret = pthread_create(&sigmund_doit_thread, 0, sigmund_doit_loop, &x); 
+    if(ret != 0)
+        printf("ERROR creating thread: %s\n", strerror(ret));
+    struct sched_param par;
+    int pol;
+    ret = pthread_getschedparam(sigmund_doit_thread, &pol, &par);
+    if(ret != 0)
+        printf("ERROR getting thread sched: %s\n", strerror(ret));
+    printf("scheduling policy: %d\n", ret);
+    par.sched_priority = 80; 
+    ret = pthread_setschedparam(sigmund_doit_thread, SCHED_FIFO, &par);
+    if(ret != 0)
+        printf("ERROR setting thread sched: %s\n", strerror(ret));
+    ret = pthread_getschedparam(sigmund_doit_thread, &pol, &par);
+    if(ret != 0)
+        printf("ERROR getting thread sched: %s\n", strerror(ret));
+    printf("scheduling policy: %d %d\n", ret, par.sched_priority);
     return (x);
 }
 
