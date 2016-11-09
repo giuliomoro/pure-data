@@ -5,7 +5,7 @@
 #include "m_pd.h"
 #include <math.h>
 #define DIM 4
-#define FLOAT double
+#define FLOAT float
 
 /* if CALCERROR is defined we compute an error estaimate to verify
 the filter, outputting it from a second outlet on demand.  This
@@ -40,14 +40,14 @@ static FLOAT clip(FLOAT value, FLOAT saturation, FLOAT saturationinverse)
     float v2 = (value*saturationinverse > 1 ? 1 :
         (value*saturationinverse < -1 ? -1:
             value*saturationinverse));
-    return (saturation * (v2 - (1./3.) * v2 * v2 * v2));
+    return (saturation * (v2 - (1.f/3.f) * v2 * v2 * v2));
 }
 #endif
 
 static void calc_derivatives(FLOAT *dstate, FLOAT *state, t_params *params)
 {
     FLOAT k = ((float)(2*3.14159)) * params->p_cutoff;
-    FLOAT sat = params->p_saturation, satinv = 1./sat;
+    FLOAT sat = params->p_saturation, satinv = 1.f/sat;
     FLOAT satstate0 = clip(state[0], sat, satinv);
     FLOAT satstate1 = clip(state[1], sat, satinv);
     FLOAT satstate2 = clip(state[2], sat, satinv);
@@ -92,31 +92,31 @@ static void solver_rungekutte(FLOAT *state, FLOAT *errorestimate,
     *errorestimate = 0;
     calc_derivatives(deriv1, state, params);
     for (i = 0; i < DIM; i++)
-        tempstate[i] = state[i] + 0.5 * stepsize * deriv1[i];
+        tempstate[i] = state[i] + 0.5f * stepsize * deriv1[i];
     calc_derivatives(deriv2, tempstate, params);
     for (i = 0; i < DIM; i++)
-        tempstate[i] = state[i] + 0.5 * stepsize * deriv2[i];
+        tempstate[i] = state[i] + 0.5f * stepsize * deriv2[i];
     calc_derivatives(deriv3, tempstate, params);
     for (i = 0; i < DIM; i++)
         tempstate[i] = state[i] + stepsize * deriv3[i];
     calc_derivatives(deriv4, tempstate, params);
     for (i = 0; i < DIM; i++)
-        state[i] += (1./6.) * stepsize * 
+        state[i] += (1.f/6.f) * stepsize * 
             (deriv1[i] + 2 * deriv2[i] + 2 * deriv3[i] + deriv4[i]);
 #if CALCERROR
     calc_derivatives(deriv1, state, params);
     for (i = 0; i < DIM; i++)
-        tempstate[i] = state[i] - 0.5 * stepsize * deriv1[i];
+        tempstate[i] = state[i] - 0.5f * stepsize * deriv1[i];
     calc_derivatives(deriv2, tempstate, params);
     for (i = 0; i < DIM; i++)
-        tempstate[i] = state[i] - 0.5 * stepsize * deriv2[i];
+        tempstate[i] = state[i] - 0.5f * stepsize * deriv2[i];
     calc_derivatives(deriv3, tempstate, params);
     for (i = 0; i < DIM; i++)
         tempstate[i] = state[i] - stepsize * deriv3[i];
     calc_derivatives(deriv4, tempstate, params);
     for (i = 0; i < DIM; i++)
     {
-        backstate[i] = state[i ]- (1./6.) * stepsize * 
+        backstate[i] = state[i ]- (1.f/6.f) * stepsize * 
             (deriv1[i] + 2 * deriv2[i] + 2 * deriv3[i] + deriv4[i]);
         *errorestimate += (backstate[i] > oldstate[i] ?
             backstate[i] - oldstate[i] : oldstate[i] - backstate[i]);
@@ -144,8 +144,8 @@ static t_class *bob_class;
 
 static void bob_saturation(t_bob *x, t_float saturation)
 {
-    if (saturation <= 1e-3)
-        saturation = 1e-3;
+    if (saturation <= 1e-3f)
+        saturation = 1e-3f;
     x->x_params.p_saturation = saturation;
 }
 
@@ -210,16 +210,16 @@ static t_int *bob_perform(t_int *w)
     t_float *resonancein = (t_float *)(w[4]);
     t_float *out = (t_float *)(w[5]);
     int n = (int)(w[6]), i, j;
-    FLOAT stepsize = 1./(x->x_oversample * x->x_sr);
+    FLOAT stepsize = 1.f/(x->x_oversample * x->x_sr);
     FLOAT errorestimate;
-    for (i = 0; i < n; i++)
+    for (i = 0; i < (n&(0xFFFFFFFF - 3)); i++)
     {
         x->x_params.p_input = *in1++;
         x->x_params.p_cutoff = *cutoffin++;
         if ((x->x_params.p_resonance = *resonancein++) < 0)
             x->x_params.p_resonance = 0;
         for (j = 0; j < x->x_oversample; j++)
-            solver_rungekutte(x->x_state, &errorestimate,
+            solver_euler(x->x_state, &errorestimate,
                 stepsize, &x->x_params);
         *out++ = x->x_state[0];
 #if CALCERROR
