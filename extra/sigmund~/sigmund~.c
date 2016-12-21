@@ -1114,7 +1114,7 @@ static int count = 0;
 static void* sigmund_doit_loop(void* null){
     while(!gShouldStop){
         RTIME sleepTime = 1000000;
-        while(gShouldDoIt == 0){
+        while(gShouldDoIt == 0 && !gShouldStop){
             rt_task_sleep(sleepTime);
         }
         if(gShouldDoIt > 1)
