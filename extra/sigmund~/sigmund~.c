@@ -974,17 +974,23 @@ static void sigmund_minpower(t_sigmund *x, t_floatarg f)
     x->x_minpower = f;
 }
 
+t_atom gAt[10][5];
+int gAtReady = 0;
+
 static void sigmund_doit(t_sigmund *x, int npts, t_float *arraypoints,
     int loud, t_float srate)
 {
 	static int _npts = -1;
-	if(bigbuf == NULL || _npts != npts){
+	static t_peak* peakv = NULL;
+	static int _npeak = -1;
+	if(bigbuf == NULL || _npts != npts || peakv == NULL || _npeak != x->x_npeak){
 		_npts = npts;
+		_npeak = x->x_npeak;
 		free(bigbuf);
-        printf("allocating\n");
+		free(peakv);
         bigbuf = (float*)calloc(1, sizeof (t_float ) * (2*NEGBINS + 6*npts));
+        peakv = (t_peak*)calloc(1, sizeof(t_peak) * x->x_npeak);
 	}
-	t_peak *peakv = (t_peak *)alloca(sizeof(t_peak) * x->x_npeak);
     int nfound, i, cnt;
     t_float freq = 0, power, note = 0;
     sigmund_getrawpeaks(npts, arraypoints, x->x_npeak, peakv,
@@ -1017,13 +1023,12 @@ static void sigmund_doit(t_sigmund *x, int npts, t_float *arraypoints,
         case OUT_PEAKS:
             for (i = 0; i < nfound; i++)
             {
-                t_atom at[5];
-                SETFLOAT(at, (t_float)i);
-                SETFLOAT(at+1, peakv[i].p_freq);
-                SETFLOAT(at+2, 2*peakv[i].p_amp);
-                SETFLOAT(at+3, 2*peakv[i].p_ampreal);
-                SETFLOAT(at+4, 2*peakv[i].p_ampimag);
-                outlet_list(v->v_outlet, 0, 5, at);   
+                SETFLOAT(gAt[i], (t_float)i);
+                SETFLOAT(gAt[i]+1, peakv[i].p_freq);
+                SETFLOAT(gAt[i]+2, 2*peakv[i].p_amp);
+                SETFLOAT(gAt[i]+3, 2*peakv[i].p_ampreal);
+                SETFLOAT(gAt[i]+4, 2*peakv[i].p_ampimag);
+				gAtReady = i + 1;
             }
             break;
         case OUT_TRACKS:
@@ -1071,10 +1076,10 @@ static void sigmund_print(t_sigmund *x)
 static pthread_t sigmund_doit_thread;
 static int gShouldStop = 0;
 static int gShouldDoIt = 0;
+static int count = 0;
 
 static void sigmund_free(t_sigmund *x)
 {
-    printf("Freeing sigmund\n");
     if (x->x_inbuf)
     {
         freebytes(x->x_inbuf, x->x_npts * sizeof(*x->x_inbuf));
@@ -1088,7 +1093,7 @@ static void sigmund_free(t_sigmund *x)
     gShouldStop = 1;
     void* value_ptr;
     pthread_join(sigmund_doit_thread, &value_ptr);
-    printf("sigmund did it %d times\n", value_ptr);
+    //printf("sigmund did it %d times (%d)\n", *(int*)value_ptr, count);
 	free(bigbuf);
 }
 
@@ -1109,8 +1114,7 @@ static void sigmund_stabletime(t_sigmund *x, t_floatarg f);
 static void sigmund_growth(t_sigmund *x, t_floatarg f);
 static void sigmund_minpower(t_sigmund *x, t_floatarg f);
 
-t_sigmund* gX;
-static int count = 0;
+t_sigmund* gX = NULL;
 static void* sigmund_doit_loop(void* null){
     while(!gShouldStop){
         RTIME sleepTime = 1000000;
@@ -1121,8 +1125,10 @@ static void* sigmund_doit_loop(void* null){
             printf("sigmund skipped: %d computations\n", gShouldDoIt - 1);
         gShouldDoIt = 0;
         t_sigmund* x = gX;
-        sigmund_doit(x, x->x_npts, x->x_inbuf, x->x_loud, x->x_sr);
-        ++count;
+        if(gX != NULL){
+            sigmund_doit(x, x->x_npts, x->x_inbuf, x->x_loud, x->x_sr);
+            ++count;
+        }
     }
     pthread_exit(&count);
 }
@@ -1147,6 +1153,17 @@ static void sigmund_tick(t_sigmund *x)
         if (x->x_loud)
             x->x_loud--;
     }
+	if(gAtReady){
+		int ats = gAtReady;
+		gAtReady = 0;
+		int cnt, n;
+		for(n = 0; n < ats; ++n){
+			for (cnt = x->x_nvarout; cnt--;){
+				t_varout *v = &x->x_varoutv[cnt];
+				outlet_list(v->v_outlet, 0, 5, gAt[n]);
+			}
+		}
+	}
 }
 
 static t_int *sigmund_perform(t_int *w)
@@ -1343,7 +1360,7 @@ static void *sigmund_new(t_symbol *s, int argc, t_atom *argv)
     ret = pthread_getschedparam(sigmund_doit_thread, &pol, &par);
     if(ret != 0)
         printf("ERROR getting thread sched: %s\n", strerror(ret));
-    printf("scheduling policy: %d %d\n", ret, par.sched_priority);
+    //printf("scheduling policy: %d %d\n", ret, par.sched_priority);
     return (x);
 }
 
