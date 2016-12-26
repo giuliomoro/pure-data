@@ -20,6 +20,12 @@
 #define SOCKET_ERROR -1
 #endif
 
+#define NET_THREADED
+
+#ifdef NET_THREADED
+#include "../../libpd_wrapper/util/ringbuffer.h"
+#endif /* NET_THREADED */
+
 #ifdef HAVE_ALLOCA_H        /* ifdef nonsense to find include for alloca() */
 # include <alloca.h>        /* linux, mac, mingw, cygwin */
 #elif defined _MSC_VER
@@ -49,6 +55,9 @@ typedef struct _netreceive
     int x_sockfd;
     int *x_connections;
     int x_old;
+#ifdef NET_THREADED
+    ring_buffer* x_rb;
+#endif
 } t_netreceive;
 
 static void netreceive_notify(t_netreceive *x, int fd);
@@ -121,6 +130,14 @@ static void netsend_readbin(t_netsend *x, int fd)
             outlet_float(x->x_msgout, inbuf[i]);
     }
 }
+
+#ifdef NET_THREADED
+static void netsend_doit_rb(void *z, t_binbuf *b){
+    t_netreceive* x = (t_netreceive*)z;
+    rb_write_to_buffer(x->x_rb, 1, "123", 4);
+    //printf("netsend_doit_rb pointer: %p %p\n", z, b);
+}
+#endif /* NET_THREADED */ 
 
 static void netsend_doit(void *z, t_binbuf *b)
 {
@@ -386,6 +403,10 @@ static void netreceive_connectpoll(t_netreceive *x)
 
 static void netreceive_closeall(t_netreceive *x)
 {
+#ifdef NET_THREADED
+    fprintf(stderr, "TODO: why does rb_free segfault?\n");
+    //rb_free(x->x_rb);
+#endif /* NET_THREADED*/
     int i;
     for (i = 0; i < x->x_nconnections; i++)
     {
@@ -405,6 +426,7 @@ static void netreceive_closeall(t_netreceive *x)
 
 static void netreceive_listen(t_netreceive *x, t_floatarg fportno)
 {
+    printf("netreceive_listen pointer: %p\n", x);
     int portno = fportno, intarg;
     struct sockaddr_in server;
     netreceive_closeall(x);
@@ -465,9 +487,14 @@ static void netreceive_listen(t_netreceive *x, t_floatarg fportno)
             sys_addpollfn(x->x_ns.x_sockfd, (t_fdpollfn)netsend_readbin, x);
         else
         {
+            printf("socketreceiver_new pointer: %p\n", x);
             t_socketreceiver *y = socketreceiver_new((void *)x, 
                 (t_socketnotifier)netreceive_notify,
+#ifdef NET_THREADED
+                    (x->x_ns.x_msgout ? netsend_doit_rb : 0), 1);
+#else
                     (x->x_ns.x_msgout ? netsend_doit : 0), 1);
+#endif /* NET_THREADED */ 
             sys_addpollfn(x->x_ns.x_sockfd, (t_fdpollfn)socketreceiver_read, y);
             x->x_ns.x_connectout = 0;
         }
@@ -503,7 +530,6 @@ static void netreceive_send(t_netreceive *x,
 
 static void *netreceive_new(t_symbol *s, int argc, t_atom *argv)
 {
-    printf("netreceive is not supported by Bela, use the C++ wrapper instead\n");
     t_netreceive *x = (t_netreceive *)pd_new(netreceive_class);
     int portno = 0;
     x->x_ns.x_protocol = SOCK_STREAM;
@@ -512,6 +538,11 @@ static void *netreceive_new(t_symbol *s, int argc, t_atom *argv)
     x->x_nconnections = 0;
     x->x_connections = (int *)t_getbytes(0);
     x->x_ns.x_sockfd = -1;
+
+#ifdef NET_THREADED
+    int size = 8192;
+    x->x_rb = rb_create(size);
+#endif /* NET_THREADED */
     if (argc && argv->a_type == A_FLOAT)
     {
         portno = atom_getfloatarg(0, argc, argv);
@@ -557,6 +588,19 @@ static void *netreceive_new(t_symbol *s, int argc, t_atom *argv)
     return (x);
 }
 
+#ifdef NET_THREADED
+static void netreceive_bang(t_netreceive *x){
+    char buf[1000];
+    int available = rb_available_to_read(x->x_rb);
+    if(available > 0){
+        int ret = rb_read_from_buffer(x->x_rb, buf, available);
+        if(ret == 0){
+            printf("Received: %s\n", buf);
+        }
+    }
+}
+#endif /* NET_THREADED */
+
 static void netreceive_setup(void)
 {
     netreceive_class = class_new(gensym("netreceive"),
@@ -566,6 +610,9 @@ static void netreceive_setup(void)
         gensym("listen"), A_FLOAT, 0);
     class_addmethod(netreceive_class, (t_method)netreceive_send,
         gensym("send"), A_GIMME, 0);
+#ifdef NET_THREADED
+    class_addbang(netreceive_class, (t_method)netreceive_bang);
+#endif /* NET_THREADED */
 }
 
 void x_net_setup(void)
