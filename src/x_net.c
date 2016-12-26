@@ -44,6 +44,9 @@ typedef struct _netsend
     int x_sockfd;
     int x_protocol;
     int x_bin;
+#ifdef NET_THREADED
+    ring_buffer* x_rb;
+#endif
 } t_netsend;
 
 static t_class *netreceive_class;
@@ -55,17 +58,17 @@ typedef struct _netreceive
     int x_sockfd;
     int *x_connections;
     int x_old;
-#ifdef NET_THREADED
-    ring_buffer* x_rb;
-#endif
 } t_netreceive;
 
 static void netreceive_notify(t_netreceive *x, int fd);
 
 static void *netsend_new(t_symbol *s, int argc, t_atom *argv)
 {
-    printf("netsend is not supported by Bela, use the C++ wrapper instead\n");
     t_netsend *x = (t_netsend *)pd_new(netsend_class);
+#ifdef NET_THREADED
+    int size = 2048;
+    x->x_rb = rb_create(size);
+#endif /* NET_THREADED */
     outlet_new(&x->x_obj, &s_float);
     x->x_protocol = SOCK_STREAM;
     x->x_bin = 0;
@@ -133,16 +136,25 @@ static void netsend_readbin(t_netsend *x, int fd)
 
 #ifdef NET_THREADED
 static void netsend_doit_rb(void *z, t_binbuf *b){
-    t_netreceive* x = (t_netreceive*)z;
-    rb_write_to_buffer(x->x_rb, 1, "123", 4);
-    //printf("netsend_doit_rb pointer: %p %p\n", z, b);
+    ////printf("Start netsend_doit_rb\n");
+    t_binbuf *c = binbuf_duplicate(b);
+    t_netsend *x = (t_netsend *)z;
+    //printf("netsend_doit_rb: adding to buffer: %p\n", c);
+    //printf("Available to write: %d\n", rb_available_to_write(x->x_rb));
+    if(rb_write_to_buffer(x->x_rb, 1, &c, sizeof(c))){
+        fprintf(stderr, "netsend: error while writing to ring buffer");
+    }
+    ////printf("Done netsend_doit_rb\n");
 }
-#endif /* NET_THREADED */ 
+#endif /* NET_THREADED */
 
 static void netsend_doit(void *z, t_binbuf *b)
 {
+    ////printf("Start netsend_doit\n");
+    ////printf("netsend_doit pointer: %p %p\n", z, b);
     t_atom messbuf[1024];
     t_netsend *x = (t_netsend *)z;
+    ////printf("netsend_doit x->x_msgout: %p\n", x->x_msgout);
     int msg, natom = binbuf_getnatom(b);
     t_atom *at = binbuf_getvec(b);
     for (msg = 0; msg < natom;)
@@ -173,6 +185,7 @@ static void netsend_doit(void *z, t_binbuf *b)
     nodice:
         msg = emsg + 1;
     }
+    ////printf("Done netsend_doit\n");
 }
 
 
@@ -342,6 +355,9 @@ static void netsend_send(t_netsend *x, t_symbol *s, int argc, t_atom *argv)
 
 static void netsend_free(t_netsend *x)
 {
+#ifdef NET_THREADED
+    rb_free(x->x_rb);
+#endif /* NET_THREADED*/
     netsend_disconnect(x);
 }
 
@@ -403,10 +419,6 @@ static void netreceive_connectpoll(t_netreceive *x)
 
 static void netreceive_closeall(t_netreceive *x)
 {
-#ifdef NET_THREADED
-    fprintf(stderr, "TODO: why does rb_free segfault?\n");
-    //rb_free(x->x_rb);
-#endif /* NET_THREADED*/
     int i;
     for (i = 0; i < x->x_nconnections; i++)
     {
@@ -426,7 +438,6 @@ static void netreceive_closeall(t_netreceive *x)
 
 static void netreceive_listen(t_netreceive *x, t_floatarg fportno)
 {
-    printf("netreceive_listen pointer: %p\n", x);
     int portno = fportno, intarg;
     struct sockaddr_in server;
     netreceive_closeall(x);
@@ -487,14 +498,13 @@ static void netreceive_listen(t_netreceive *x, t_floatarg fportno)
             sys_addpollfn(x->x_ns.x_sockfd, (t_fdpollfn)netsend_readbin, x);
         else
         {
-            printf("socketreceiver_new pointer: %p\n", x);
             t_socketreceiver *y = socketreceiver_new((void *)x, 
                 (t_socketnotifier)netreceive_notify,
 #ifdef NET_THREADED
                     (x->x_ns.x_msgout ? netsend_doit_rb : 0), 1);
 #else
                     (x->x_ns.x_msgout ? netsend_doit : 0), 1);
-#endif /* NET_THREADED */ 
+#endif /* NET_THREADED */
             sys_addpollfn(x->x_ns.x_sockfd, (t_fdpollfn)socketreceiver_read, y);
             x->x_ns.x_connectout = 0;
         }
@@ -528,9 +538,21 @@ static void netreceive_send(t_netreceive *x,
     }
 }
 
+static void netreceive_free(t_netreceive *x)
+{
+#ifdef NET_THREADED
+    rb_free(x->x_ns.x_rb);
+#endif /* NET_THREADED */
+    netreceive_closeall(x);
+}
+
 static void *netreceive_new(t_symbol *s, int argc, t_atom *argv)
 {
     t_netreceive *x = (t_netreceive *)pd_new(netreceive_class);
+#ifdef NET_THREADED
+    int size = 2048;
+    x->x_ns.x_rb = rb_create(size);
+#endif /* NET_THREADED */
     int portno = 0;
     x->x_ns.x_protocol = SOCK_STREAM;
     x->x_old = 0;
@@ -539,10 +561,6 @@ static void *netreceive_new(t_symbol *s, int argc, t_atom *argv)
     x->x_connections = (int *)t_getbytes(0);
     x->x_ns.x_sockfd = -1;
 
-#ifdef NET_THREADED
-    int size = 8192;
-    x->x_rb = rb_create(size);
-#endif /* NET_THREADED */
     if (argc && argv->a_type == A_FLOAT)
     {
         portno = atom_getfloatarg(0, argc, argv);
@@ -590,21 +608,35 @@ static void *netreceive_new(t_symbol *s, int argc, t_atom *argv)
 
 #ifdef NET_THREADED
 static void netreceive_bang(t_netreceive *x){
-    char buf[1000];
-    int available = rb_available_to_read(x->x_rb);
-    if(available > 0){
-        int ret = rb_read_from_buffer(x->x_rb, buf, available);
+    ////printf("Start netreceive_bang\n");
+    t_binbuf* buf;
+    size_t expectedLength = sizeof(buf);
+    int available;
+    while(available = rb_available_to_read(x->x_ns.x_rb)){
+        if(available < expectedLength){
+            post("netreceive: unexpected length in the buffer");
+            break;
+        }
+        ////printf("Received a bang, available: %d\n", available);
+        int ret = rb_read_from_buffer(x->x_ns.x_rb, (char*)&buf, sizeof(buf));
+        if(ret)
+            printf("ret: %d\n");
         if(ret == 0){
-            printf("Received: %s\n", buf);
+            int len = 1000;
+            char string[len];
+            ////printf("Received: %p\n", buf);
+            netsend_doit(x, buf);
+            binbuf_free(buf);
         }
     }
+    ////printf("Done netreceive_bang\n");
 }
 #endif /* NET_THREADED */
 
 static void netreceive_setup(void)
 {
     netreceive_class = class_new(gensym("netreceive"),
-        (t_newmethod)netreceive_new, (t_method)netreceive_closeall,
+        (t_newmethod)netreceive_new, (t_method)netreceive_free,
         sizeof(t_netreceive), 0, A_GIMME, 0);
     class_addmethod(netreceive_class, (t_method)netreceive_listen,
         gensym("listen"), A_FLOAT, 0);
