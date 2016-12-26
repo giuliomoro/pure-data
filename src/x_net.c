@@ -102,6 +102,12 @@ static void *netsend_new(t_symbol *s, int argc, t_atom *argv)
     return (x);
 }
 
+#ifdef NET_THREADED
+static void netsend_readbin_rb(t_netsend *x, int fd){
+    printf("netsend_readbin_rb: Todo\n");
+}
+#endif /* NET_THREADED */
+
 static void netsend_readbin(t_netsend *x, int fd)
 {
     unsigned char inbuf[MAXPDSTRING];
@@ -494,17 +500,21 @@ static void netreceive_listen(t_netreceive *x, t_floatarg fportno)
 
     if (x->x_ns.x_protocol == SOCK_DGRAM)        /* datagram protocol */
     {
+#ifdef NET_THREADED
+        //todo: clear x_rb ringbuffer
+        t_fdpollfn binaryCallback = (t_fdpollfn)netsend_readbin_rb;
+        t_socketreceivefn textCallback = netsend_doit_rb;
+#else
+        t_fdpollfn binaryCallback = netsend_readbin;
+        t_socketreceivefn textCallback = netsend_doit;
+#endif /* NET_THREADED */
         if (x->x_ns.x_bin)
-            sys_addpollfn(x->x_ns.x_sockfd, (t_fdpollfn)netsend_readbin, x);
+            sys_addpollfn(x->x_ns.x_sockfd, (t_fdpollfn)binaryCallback, x);
         else
         {
             t_socketreceiver *y = socketreceiver_new((void *)x, 
                 (t_socketnotifier)netreceive_notify,
-#ifdef NET_THREADED
-                    (x->x_ns.x_msgout ? netsend_doit_rb : 0), 1);
-#else
-                    (x->x_ns.x_msgout ? netsend_doit : 0), 1);
-#endif /* NET_THREADED */
+                    (x->x_ns.x_msgout ? textCallback : 0), 1);
             sys_addpollfn(x->x_ns.x_sockfd, (t_fdpollfn)socketreceiver_read, y);
             x->x_ns.x_connectout = 0;
         }
