@@ -58,6 +58,10 @@ typedef struct _netreceive
     int x_sockfd;
     int *x_connections;
     int x_old;
+#ifdef NET_THREADED
+    t_clock* x_clock;
+    double x_deltime;
+#endif /* NET_THREADED */
 } t_netreceive;
 
 static void netreceive_notify(t_netreceive *x, int fd);
@@ -559,18 +563,30 @@ static void netreceive_send(t_netreceive *x,
 static void netreceive_free(t_netreceive *x)
 {
 #ifdef NET_THREADED
+    clock_free(x->x_clock);
     rb_free(x->x_ns.x_rb);
 #endif /* NET_THREADED */
     netreceive_closeall(x);
 }
 
+#ifdef NET_THREADED
+static void netreceive_bang(t_netreceive *x);
+static void netreceive_tick(t_netreceive *x){
+    netreceive_bang(x);
+    clock_delay(x->x_clock, x->x_deltime);
+}
+#endif /* NET_THREADED */
+
 static void *netreceive_new(t_symbol *s, int argc, t_atom *argv)
 {
-    post("Note: this [netsend] requires a `bang` to poll for received data");
     t_netreceive *x = (t_netreceive *)pd_new(netreceive_class);
 #ifdef NET_THREADED
     int size = 2048;
     x->x_ns.x_rb = rb_create(size);
+    x->x_clock = clock_new(x, (t_method)netreceive_tick);
+    // set the internal metro at 1.46ms ( > 64 samples)
+    x->x_deltime = 1.46;
+    netreceive_tick(x); //make sure you call this after creating the ring buffer
 #endif /* NET_THREADED */
     int portno = 0;
     x->x_ns.x_protocol = SOCK_STREAM;
@@ -627,7 +643,6 @@ static void *netreceive_new(t_symbol *s, int argc, t_atom *argv)
 
 #ifdef NET_THREADED
 static void netreceive_bang(t_netreceive *x){
-    ////printf("Start netreceive_bang\n");
     int isbin = x->x_ns.x_bin;
     int available;
     int bufsize = isbin ? 1000 : sizeof(t_binbuf*);
