@@ -125,9 +125,10 @@ static void netsend_readbin(t_netsend *x, int fd)
             netreceive_notify((t_netreceive *)x, fd);
     }
 #ifdef NET_THREADED
-    if(rb_write_to_buffer(x->x_rb, 1, inbuf, ret)){
+    ////post("Writing %d bytes to buffer", ret + sizof(ret));
+    // Messages start with a size (ret) followed by a payload of the specified size
+    if(rb_write_to_buffer(x->x_rb, 2, &ret, sizeof(ret), inbuf, ret))
         fprintf(stderr, "netsend: error while writing to ring buffer");
-    }
 }
 
 static void netsend_readbin_doit(t_netsend *x, char* inbuf, int size)
@@ -645,16 +646,37 @@ static void *netreceive_new(t_symbol *s, int argc, t_atom *argv)
 static void netreceive_bang(t_netreceive *x){
     int isbin = x->x_ns.x_bin;
     int available;
-    int bufsize = isbin ? 1000 : sizeof(t_binbuf*);
+    int bufsize = isbin ? 6000 : sizeof(t_binbuf*);
     union{
         char buf[bufsize];
         t_binbuf* binbuf;
+        int integer;
     } buf;
     while(available = rb_available_to_read(x->x_ns.x_rb)){
-        ////printf("Received a bang, available: %d\n", available);
+        printf("Received a bang, available: %d\n", available);
         int bytes;
-        if(isbin)
-            bytes = available < bufsize ? available : bufsize;
+        if(isbin){
+            // the messages are stored in count/payload pairs
+            int countSize = sizeof(int);
+            int ret = rb_read_from_buffer(x->x_ns.x_rb, (char*)&buf.integer, countSize);
+            if(ret){
+                error("netreceive: error while reading from buffer");
+                break;
+            }
+            bytes = buf.integer;
+            if(available - countSize < bytes){
+                //the payload is shorter than expected
+                error("netreceive: error while reading from buffer");
+                // TODO: here we should do something to recover from the error
+                // e.g.: drain the buffer
+                break;
+            }
+            if(bytes > bufsize){
+                error("netreceive: error the payload is too large for our buffersize");
+                // TODO: here we should do something to recover from the error
+                // e.g.: drain the buffer
+            }
+        }
         else
         {
             bytes =  sizeof(t_binbuf*);
