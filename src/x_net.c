@@ -102,12 +102,6 @@ static void *netsend_new(t_symbol *s, int argc, t_atom *argv)
     return (x);
 }
 
-#ifdef NET_THREADED
-static void netsend_readbin_rb(t_netsend *x, int fd){
-    printf("netsend_readbin_rb: Todo\n");
-}
-#endif /* NET_THREADED */
-
 static void netsend_readbin(t_netsend *x, int fd)
 {
     unsigned char inbuf[MAXPDSTRING];
@@ -126,6 +120,19 @@ static void netsend_readbin(t_netsend *x, int fd)
         if (x->x_obj.ob_pd == netreceive_class)
             netreceive_notify((t_netreceive *)x, fd);
     }
+#ifdef NET_THREADED
+    if(rb_write_to_buffer(x->x_rb, 1, inbuf, ret)){
+        fprintf(stderr, "netsend: error while writing to ring buffer");
+    }
+}
+
+static void netsend_readbin_doit(t_netsend *x, char* inbuf, int size)
+{
+    int i;
+    int ret = size;
+    if(0) // this is so that we can write readbin_doit reusing existing code
+        ; //no op
+#endif /* NET_THREADED */
     else if (x->x_protocol == SOCK_DGRAM)
     {
         t_atom *ap = (t_atom *)alloca(ret * sizeof(t_atom));
@@ -141,7 +148,8 @@ static void netsend_readbin(t_netsend *x, int fd)
 }
 
 #ifdef NET_THREADED
-static void netsend_doit_rb(void *z, t_binbuf *b){
+static void netsend_doit_rb(void *z, t_binbuf *b)
+{
     ////printf("Start netsend_doit_rb\n");
     t_binbuf *c = binbuf_duplicate(b);
     t_netsend *x = (t_netsend *)z;
@@ -502,7 +510,7 @@ static void netreceive_listen(t_netreceive *x, t_floatarg fportno)
     {
 #ifdef NET_THREADED
         //todo: clear x_rb ringbuffer
-        t_fdpollfn binaryCallback = (t_fdpollfn)netsend_readbin_rb;
+        t_fdpollfn binaryCallback = (t_fdpollfn)netsend_readbin;
         t_socketreceivefn textCallback = netsend_doit_rb;
 #else
         t_fdpollfn binaryCallback = netsend_readbin;
@@ -558,6 +566,7 @@ static void netreceive_free(t_netreceive *x)
 
 static void *netreceive_new(t_symbol *s, int argc, t_atom *argv)
 {
+    post("Note: this [netsend] requires a `bang` to poll for received data");
     t_netreceive *x = (t_netreceive *)pd_new(netreceive_class);
 #ifdef NET_THREADED
     int size = 2048;
@@ -619,24 +628,37 @@ static void *netreceive_new(t_symbol *s, int argc, t_atom *argv)
 #ifdef NET_THREADED
 static void netreceive_bang(t_netreceive *x){
     ////printf("Start netreceive_bang\n");
-    t_binbuf* buf;
-    size_t expectedLength = sizeof(buf);
+    int isbin = x->x_ns.x_bin;
     int available;
+    int bufsize = isbin ? 1000 : sizeof(t_binbuf*);
+    union{
+        char buf[bufsize];
+        t_binbuf* binbuf;
+    } buf;
     while(available = rb_available_to_read(x->x_ns.x_rb)){
-        if(available < expectedLength){
-            post("netreceive: unexpected length in the buffer");
+        ////printf("Received a bang, available: %d\n", available);
+        int bytes;
+        if(isbin)
+            bytes = available < bufsize ? available : bufsize;
+        else
+        {
+            bytes =  sizeof(t_binbuf*);
+            if(available < bytes){
+                error("netreceive: unexpected length in buffer: %d", available);
+                break;
+            }
+        }
+        int ret = rb_read_from_buffer(x->x_ns.x_rb, buf.buf, bytes);
+        if(ret){
+            error("netreceive: error while reading from buffer");
             break;
         }
-        ////printf("Received a bang, available: %d\n", available);
-        int ret = rb_read_from_buffer(x->x_ns.x_rb, (char*)&buf, sizeof(buf));
-        if(ret)
-            printf("ret: %d\n");
-        if(ret == 0){
-            int len = 1000;
-            char string[len];
-            ////printf("Received: %p\n", buf);
-            netsend_doit(x, buf);
-            binbuf_free(buf);
+        if(isbin)
+            netsend_readbin_doit(&x->x_ns, buf.buf, bytes);
+        else
+        {
+            netsend_doit(x, buf.binbuf);
+            binbuf_free(buf.binbuf);
         }
     }
     ////printf("Done netreceive_bang\n");
