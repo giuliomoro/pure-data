@@ -315,12 +315,14 @@ static int netsend_dosend(t_netsend *x, int sockfd,
     else
     {
         t_atom at;
-        b = binbuf_new();
-        binbuf_add(b, argc, argv);
+        b = binbuf_new(); //TODO: allocate this in the netsend_new()
+        binbuf_add(b, argc, argv); // this potentially reallocates. TODO: make it large enough to start with
         SETSEMI(&at);
         binbuf_add(b, 1, &at);
         binbuf_gettext(b, &buf, &length);
     }
+	// TODO: split here and write to rb
+	// TODO: the following goes in separate thread
     for (bp = buf, sent = 0; sent < length;)
     {
         static double lastwarntime;
@@ -357,7 +359,7 @@ static int netsend_dosend(t_netsend *x, int sockfd,
     if (!x->x_bin)
     {
         t_freebytes(buf, length);
-        binbuf_free(b);
+        binbuf_free(b); //TODO: Freeing should be done in the secondary thread
     }
     return (fail);
 }
@@ -368,6 +370,8 @@ static void netsend_send(t_netsend *x, t_symbol *s, int argc, t_atom *argv)
     if (x->x_sockfd >= 0)
     {
         if (netsend_dosend(x, x->x_sockfd, s, argc, argv))
+			// TODO: set "fail" return value of netsend in a member of t_netsend
+			// and check for it at the next "tick"
             netsend_disconnect(x);
     }
 }
@@ -556,6 +560,8 @@ static void netreceive_send(t_netreceive *x,
     for (i = 0; i < x->x_nconnections; i++)
     {
         if (netsend_dosend(&x->x_ns, x->x_connections[i], s, argc, argv))
+			// TODO: set "fail" return value of netsend in a member of t_netsend
+			// and check for it at the next "tick"
             pd_error(x, "netreceive send message failed");
                 /* should we now close the connection? */
     }

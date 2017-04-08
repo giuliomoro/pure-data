@@ -338,11 +338,11 @@ void pd_init(void)
 {
     if (!pd_this)
         pd_this = pdinstance_donew(0);
-    mess_init();
-    obj_init();
-    conf_init();
-    glob_init();
-    garray_init();
+    mess_init(); // creates pd_objectmaker and pd_canvasmaker
+    obj_init(); // creates pointerinlet, floatinlet, symbolinlet
+    conf_init(); // setups the internal objects
+    glob_init(); // creates stuff that you may not need for libpd
+    garray_init();/* create invisible, built-in canvases to supply templates for floats and float-arrays. */
 }
 
 EXTERN void pd_setinstance(t_pdinstance *x)
