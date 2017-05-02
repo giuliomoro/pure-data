@@ -9,6 +9,7 @@ that didn't really belong anywhere. */
 #include "s_stuff.h"
 #include "m_imp.h"
 #include "g_canvas.h"   /* for GUI queueing stuff */
+#include "ringbuffer.h"
 #ifndef _WIN32
 #include <unistd.h>
 #include <sys/socket.h>
@@ -72,11 +73,19 @@ typedef int socklen_t;
 #define LOCALHOST "localhost"
 #endif
 
+#define RB_SIZE 8192
+typedef struct _rb_msg
+{
+    size_t length;
+    char* ptr;
+} t_rb_msg;
+
 typedef struct _fdpoll
 {
     int fdp_fd;
     t_fdpollfn fdp_fn;
     void *fdp_ptr;
+    ring_buffer* rb;
 } t_fdpoll;
 
 #define INBUFSIZE 4096
@@ -160,43 +169,101 @@ double sys_getrealtime(void)
 
 extern int sys_nosleep;
 
-static int sys_domicrosleep(int microsec, int pollem)
+static void poll_fds()
 {
+    const unsigned int maxRecv = 10000; // an arbitrary limit of ~10MB  per packet
+    char* buf;
+    buf = (char*)malloc(maxRecv);
+    int i, ret;
     struct timeval timout;
-    int i, didsomething = 0;
     t_fdpoll *fp;
     timout.tv_sec = 0;
-    timout.tv_usec = (sys_nosleep ? 0 : microsec);
+    timout.tv_usec = 0;
+    fd_set readset, writeset, exceptset;
+    FD_ZERO(&writeset);
+    FD_ZERO(&readset);
+    FD_ZERO(&exceptset);
+    for (fp = sys_fdpoll, i = sys_nfdpoll; i--; fp++)
+	{
+		if(fp->fdp_fd == -1){
+			printf("fdp == -1: %p %l\n", fp, fp - sys_fdpoll);
+			continue;
+		}
+        FD_SET(fp->fdp_fd, &readset);
+	}
+#ifdef _WIN32
+    if (sys_maxfd == 0)
+            Sleep(microsec/1000);
+    else
+#endif
+    select(sys_maxfd+1, &readset, &writeset, &exceptset, &timout);
+    for(i = 0; i < sys_nfdpoll; i++)
+    {
+        if (FD_ISSET(sys_fdpoll[i].fdp_fd, &readset))
+		{
+            int fd = sys_fdpoll[i].fdp_fd;
+            ring_buffer* rb = sys_fdpoll[i].rb;
+            ret = recv(fd, buf, INBUFSIZE, 0);
+            t_rb_msg msg;
+            if(ret < 0)
+            {
+                fprintf(stderr, "Error during recv: %d\n", ret);
+                // write a NULL to flag an error
+                msg.ptr = NULL;
+                msg.length = 0;
+            }
+            else if(ret < maxRecv)  
+            {
+                // Allocate and store a pointer into the ring_buffer.
+                // It is up to the receiver to free it
+                char* new_buf = malloc(ret);
+                memcpy(new_buf, buf, ret);
+                msg.length = ret;
+                msg.ptr = new_buf;
+            }
+            else 
+            {
+                fprintf(stderr, "too much stuff received: %d\n", ret);
+                continue;
+            }
+            ret = rb_write_to_buffer(rb, 1, &msg, sizeof(t_rb_msg));
+            if(ret)
+            {
+                perror("Not enough space to write to buffer\n");
+            }
+        }
+    }
+    free(buf);
+}
+
+int sys_domicrosleep(int microsec, int pollem)
+{
+    int i, didsomething = 0;
     if (pollem)
     {
-        fd_set readset, writeset, exceptset;
-        FD_ZERO(&writeset);
-        FD_ZERO(&readset);
-        FD_ZERO(&exceptset);
-        for (fp = sys_fdpoll, i = sys_nfdpoll; i--; fp++)
-            FD_SET(fp->fdp_fd, &readset);
-#ifdef _WIN32
-        if (sys_maxfd == 0)
-                Sleep(microsec/1000);
-        else
-#endif
-        select(sys_maxfd+1, &readset, &writeset, &exceptset, &timout);
+		poll_fds();
         for (i = 0; i < sys_nfdpoll; i++)
-            if (FD_ISSET(sys_fdpoll[i].fdp_fd, &readset))
         {
+            if(rb_available_to_read(sys_fdpoll[i].rb) > 0)
+            {
 #ifdef THREAD_LOCKING
-            sys_lock();
+                sys_lock();
 #endif
-            (*sys_fdpoll[i].fdp_fn)(sys_fdpoll[i].fdp_ptr, sys_fdpoll[i].fdp_fd);
+                (*sys_fdpoll[i].fdp_fn)(sys_fdpoll[i].fdp_ptr, sys_fdpoll[i].rb, sys_fdpoll[i].fdp_fd);
 #ifdef THREAD_LOCKING
-            sys_unlock();
+                sys_unlock();
 #endif
-            didsomething = 1;
+				didsomething = 1;
+            }
         }
         return (didsomething);
     }
     else
     {
+        struct timeval timout;
+        t_fdpoll *fp;
+        timout.tv_sec = 0;
+        timout.tv_usec = (sys_nosleep ? 0 : microsec);
 #ifdef _WIN32
         if (sys_maxfd == 0)
               Sleep(microsec/1000);
@@ -340,6 +407,11 @@ void sys_sockerror(char *s)
 
 void sys_addpollfn(int fd, t_fdpollfn fn, void *ptr)
 {
+	if(fd == -1)
+	{
+		fprintf(stderr, "File descriptor is not valid\n");
+		return;
+	}
     int nfd = sys_nfdpoll;
     int size = nfd * sizeof(t_fdpoll);
     t_fdpoll *fp;
@@ -349,6 +421,7 @@ void sys_addpollfn(int fd, t_fdpollfn fn, void *ptr)
     fp->fdp_fd = fd;
     fp->fdp_fn = fn;
     fp->fdp_ptr = ptr;
+	fp->rb = rb_create(RB_SIZE);
     sys_nfdpoll = nfd + 1;
     if (fd >= sys_maxfd) sys_maxfd = fd + 1;
 }
@@ -428,10 +501,28 @@ static int socketreceiver_doread(t_socketreceiver *x)
     return (0);
 }
 
-static void socketreceiver_getudp(t_socketreceiver *x, int fd)
+int rb_recv(ring_buffer* rb, char* buf, size_t length, void* nothing)
+{
+    int ret;
+    t_rb_msg msg;
+    rb_read_from_buffer(rb, (char*)&msg, sizeof(t_rb_msg));
+    if(msg.ptr == NULL)
+        ret = -1;
+    else
+    {
+        ret = msg.length;
+        memcpy(buf, msg.ptr, length < ret ? length : ret);
+        free(msg.ptr);
+    }
+    return ret;
+}
+
+static void socketreceiver_getudp(t_socketreceiver *x, ring_buffer* rb, int fd)
 {
     char buf[INBUFSIZE+1];
-    int ret = recv(fd, buf, INBUFSIZE, 0);
+    //int ret = recv(fd, buf, INBUFSIZE, 0);
+    int ret = rb_recv(rb, buf, INBUFSIZE, 0);
+        
     if (ret < 0)
     {
         sys_sockerror("recv");
@@ -467,10 +558,10 @@ static void socketreceiver_getudp(t_socketreceiver *x, int fd)
 
 void sys_exit(void);
 
-void socketreceiver_read(t_socketreceiver *x, int fd)
+void socketreceiver_read(t_socketreceiver *x, ring_buffer* rb, int fd)
 {
     if (x->sr_udp)   /* UDP ("datagram") socket protocol */
-        socketreceiver_getudp(x, fd);
+        socketreceiver_getudp(x, rb, fd);
     else  /* TCP ("streaming") socket protocol */
     {
         char *semi;
@@ -487,7 +578,8 @@ void socketreceiver_read(t_socketreceiver *x, int fd)
         }
         else
         {
-            ret = recv(fd, x->sr_inbuf + x->sr_inhead,
+            //ret = recv(fd, x->sr_inbuf + x->sr_inhead,
+            ret = rb_recv(rb, x->sr_inbuf + x->sr_inhead,
                 readto - x->sr_inhead, 0);
             if (ret < 0)
             {
@@ -979,6 +1071,12 @@ int sys_startgui(const char *libdir)
                 post("setsockopt (SO_RCVBUF) failed\n");
 #endif
         intarg = 1;
+        if (setsockopt(xsock, SOL_SOCKET, SO_REUSEADDR,
+            &intarg, sizeof(intarg)) < 0)
+#ifndef _WIN32
+                post("setsockopt (SO_REUSEADDR) failed\n")
+#endif
+                    ;
         if (setsockopt(xsock, IPPROTO_TCP, TCP_NODELAY,
             &intarg, sizeof(intarg)) < 0)
 #ifndef _WIN32
@@ -1077,6 +1175,7 @@ int sys_startgui(const char *libdir)
                  libdir, libdir, (getenv("HOME") ? "" : " HOME=/tmp"),
                     libdir, portno);
 #endif /* __APPLE__ */
+			printf("running: %s\n", cmdbuf);
             sys_guicmd = cmdbuf;
         }
 

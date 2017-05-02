@@ -55,6 +55,7 @@ static void netreceive_notify(t_netreceive *x, int fd);
 
 static void *netsend_new(t_symbol *s, int argc, t_atom *argv)
 {
+    printf("netsend is not supported by Bela, use the C++ wrapper instead\n");
     t_netsend *x = (t_netsend *)pd_new(netsend_class);
     outlet_new(&x->x_obj, &s_float);
     x->x_protocol = SOCK_STREAM;
@@ -89,10 +90,12 @@ static void *netsend_new(t_symbol *s, int argc, t_atom *argv)
     return (x);
 }
 
-static void netsend_readbin(t_netsend *x, int fd)
+#include "ringbuffer.h"
+static void netsend_readbin(t_netsend *x, ring_buffer* rb, int fd)
 {
     unsigned char inbuf[MAXPDSTRING];
     int ret = recv(fd, inbuf, MAXPDSTRING, 0), i;
+    //int ret = rb_recv(rb, inbuf, MAXPDSTRING, 0), i;
     if (!x->x_msgout)
     {
         bug("netsend_readbin");
@@ -361,7 +364,9 @@ static void netreceive_notify(t_netreceive *x, int fd)
 
 static void netreceive_connectpoll(t_netreceive *x)
 {
-    int fd = accept(x->x_ns.x_sockfd, 0, 0);
+    printf("Well this does not work now\n");
+    int fd = -1;
+    //int fd = accept(x->x_ns.x_sockfd, 0, 0);
     if (fd < 0) post("netreceive: accept failed");
     else
     {
@@ -502,6 +507,7 @@ static void netreceive_send(t_netreceive *x,
 
 static void *netreceive_new(t_symbol *s, int argc, t_atom *argv)
 {
+    printf("netreceive is not supported by Bela, use the C++ wrapper instead\n");
     t_netreceive *x = (t_netreceive *)pd_new(netreceive_class);
     int portno = 0;
     x->x_ns.x_protocol = SOCK_STREAM;
