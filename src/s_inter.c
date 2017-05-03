@@ -171,7 +171,7 @@ extern int sys_nosleep;
 
 static void poll_fds()
 {
-    const unsigned int maxRecv = 10000; // an arbitrary limit of ~10MB  per packet
+    const unsigned int maxRecv = 1000000; // an arbitrary limit of per packet
     char* buf;
     buf = (char*)malloc(maxRecv);
     int i, ret;
@@ -241,7 +241,6 @@ int sys_domicrosleep(int microsec, int pollem)
     int i, didsomething = 0;
     if (pollem)
     {
-		poll_fds();
         for (i = 0; i < sys_nfdpoll; i++)
         {
             if(rb_available_to_read(sys_fdpoll[i].rb) > 0)
@@ -652,6 +651,7 @@ typedef struct _guiqueue
 
 static t_guiqueue *sys_guiqueuehead;
 static char *sys_guibuf;
+static ring_buffer *sys_guibuf_rb;
 static int sys_guibufhead;
 static int sys_guibuftail;
 static int sys_guibufsize;
@@ -725,6 +725,10 @@ void sys_vgui(char *fmt, ...)
         sys_guibufsize = GUI_ALLOCCHUNK;
         sys_guibufhead = sys_guibuftail = 0;
     }
+	if (!sys_guibuf_rb)
+	{
+		sys_guibuf_rb = rb_create(GUI_ALLOCCHUNK * 8);
+	}
     if (sys_guibufhead > sys_guibufsize - (GUI_ALLOCCHUNK/2))
         sys_trytogetmoreguibuf(sys_guibufsize + GUI_ALLOCCHUNK);
     va_start(ap, fmt);
@@ -762,11 +766,66 @@ void sys_gui(char *s)
     sys_vgui("%s", s);
 }
 
+
+ssize_t rb_send(ring_buffer* rb, int socket, const void *buffer, size_t length, int flags)
+{
+    size_t maxLength = rb_available_to_write(rb);
+    size_t desiredLength = sizeof(size_t) + length;
+    size_t actualLength = desiredLength <= maxLength ? desiredLength : maxLength;
+    if(actualLength < desiredLength)
+    {
+        // now we are in trouble:
+		// TODO: what should we do? Realloc the ringbuffer I guess
+        perror("rb buffer is full, discarding message");
+        return -1;
+    }
+    // TODO: what happens if a socket is removed while it is in the queue?
+    rb_write_to_buffer(rb, 3, (char*)&socket, sizeof(socket), (char*)&length, sizeof(length), buffer, length);
+	//printf("Writing to buffer: %p, %d, %s\n", socket, length, buffer);
+	printf("Amount left in buffer: %d\n", rb_available_to_write(rb));
+    return actualLength;
+}
+
+void rb_dosend(ring_buffer* rb)
+{
+    int socket;
+    size_t length;
+    char* buf;
+    if(rb_read_from_buffer(rb, (char*)&socket, sizeof(socket)) < 0)
+	{
+		// no message to retrieve
+        return;
+	}
+    if(rb_read_from_buffer(rb, (char*)&length, sizeof(length)) < 0)
+    {
+        // TODO: we should never be here 
+        perror("we should not be here 1");
+        return;
+    }
+    buf = (char*)malloc(length);
+    if(rb_read_from_buffer(rb, buf, length) < 0)
+    {
+        // TODO: we should never be here 
+        perror("we should not be here 2");
+        return;
+    }
+	printf("Reading from buffer: %d, %d\n", socket, length);
+    int nwrote = send(socket, buf, length, 0);
+
+    if (nwrote < 0)
+    {
+        // TODO: these are probably not thread-safe
+        perror("pd-to-gui socket");
+        sys_bail(1);
+    }
+
+}
+
 static int sys_flushtogui( void)
 {
     int writesize = sys_guibufhead - sys_guibuftail, nwrote = 0;
     if (writesize > 0)
-        nwrote = send(sys_guisock, sys_guibuf + sys_guibuftail, writesize, 0);
+        nwrote = rb_send(sys_guibuf_rb, sys_guisock, sys_guibuf + sys_guibuftail, writesize, 0);
 
 #if 0   
     if (writesize)
@@ -937,6 +996,19 @@ static int defaultfontshit[MAXFONTS] = {
     8, 5, 9, 10, 6, 10, 12, 7, 13, 14, 9, 17, 16, 10, 19, 24, 15, 28,
         24, 15, 28};
 #define NDEFAULTFONT (sizeof(defaultfontshit)/sizeof(*defaultfontshit))
+
+void rb_dosend(ring_buffer*);
+void poll_fds();
+void* poll_thread_loop(void* arg)
+{
+	printf("Running polling thread\n");
+	while(1)
+	{
+		poll_fds();
+		rb_dosend(sys_guibuf_rb);
+		usleep(10000);
+	}
+}
 
 int sys_startgui(const char *libdir)
 {
@@ -1177,6 +1249,7 @@ int sys_startgui(const char *libdir)
 #endif /* __APPLE__ */
 			printf("running: %s\n", cmdbuf);
             sys_guicmd = cmdbuf;
+
         }
 
         if (sys_verbose) 
@@ -1388,6 +1461,8 @@ int sys_startgui(const char *libdir)
                  PD_BUGFIX_VERSION, PD_TEST_VERSION,
                  buf, buf2, sys_font, sys_fontweight); 
         sys_vgui("set pd_whichapi %d\n", sys_audioapi);
+		pthread_t fdPollThread;
+		pthread_create(&fdPollThread, NULL, poll_thread_loop, NULL);
     }
     return (0);
 }
