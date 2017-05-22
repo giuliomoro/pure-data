@@ -73,12 +73,7 @@ typedef int socklen_t;
 #define LOCALHOST "localhost"
 #endif
 
-#define RB_SIZE 8192
-typedef struct _rb_msg
-{
-    size_t length;
-    char* ptr;
-} t_rb_msg;
+#define RB_SIZE 16384
 
 typedef struct _fdpoll
 {
@@ -171,7 +166,7 @@ extern int sys_nosleep;
 
 static void poll_fds()
 {
-    const unsigned int maxRecv = 1000000; // an arbitrary limit of per packet
+    const unsigned int maxRecv = RB_SIZE; // an arbitrary limit per call to recv, which will be further narrowed down below on a per-socket basis
     char* buf;
     buf = (char*)malloc(maxRecv);
     int i, ret;
@@ -203,33 +198,17 @@ static void poll_fds()
 		{
             int fd = sys_fdpoll[i].fdp_fd;
             ring_buffer* rb = sys_fdpoll[i].rb;
-            ret = recv(fd, buf, INBUFSIZE, 0);
-            t_rb_msg msg;
+            unsigned int size = rb_available_to_write(rb);
+            size = size > maxRecv ? maxRecv : size;
+            ret = recv(fd, buf, size, 0);
             if(ret < 0)
             {
-                fprintf(stderr, "Error during recv: %d\n", ret);
-                // write a NULL to flag an error
-                msg.ptr = NULL;
-                msg.length = 0;
+                fprintf(stderr, "Error during recv: %s(%d)\n", strerror(-ret), -ret);
             }
-            else if(ret < maxRecv)  
+            else
             {
-                // Allocate and store a pointer into the ring_buffer.
-                // It is up to the receiver to free it
-                char* new_buf = malloc(ret);
-                memcpy(new_buf, buf, ret);
-                msg.length = ret;
-                msg.ptr = new_buf;
-            }
-            else 
-            {
-                fprintf(stderr, "too much stuff received: %d\n", ret);
-                continue;
-            }
-            ret = rb_write_to_buffer(rb, 1, &msg, sizeof(t_rb_msg));
-            if(ret)
-            {
-                perror("Not enough space to write to buffer\n");
+                // store the received data in the ringbuffer
+                ret = rb_write_to_buffer(rb, 1, buf, ret);
             }
         }
     }
@@ -503,17 +482,16 @@ static int socketreceiver_doread(t_socketreceiver *x)
 int rb_recv(ring_buffer* rb, char* buf, size_t length, void* nothing)
 {
     int ret;
-    t_rb_msg msg;
-    rb_read_from_buffer(rb, (char*)&msg, sizeof(t_rb_msg));
-    if(msg.ptr == NULL)
-        ret = -1;
-    else
+    int maxLength = rb_available_to_read(rb);
+    // only request as many bytes as we can store if they are available
+    int actualLength = length < maxLength ? length : maxLength;
+    ret = rb_read_from_buffer(rb, buf, actualLength);
+    if(ret)
     {
-        ret = msg.length;
-        memcpy(buf, msg.ptr, length < ret ? length : ret);
-        free(msg.ptr);
+        printf("Error while reading from buffer: %d\n", ret);
+        return -1;
     }
-    return ret;
+    return actualLength;
 }
 
 static void socketreceiver_getudp(t_socketreceiver *x, ring_buffer* rb, int fd)
@@ -781,8 +759,6 @@ ssize_t rb_send(ring_buffer* rb, int socket, const void *buffer, size_t length, 
     }
     // TODO: what happens if a socket is removed while it is in the queue?
     rb_write_to_buffer(rb, 3, (char*)&socket, sizeof(socket), (char*)&length, sizeof(length), buffer, length);
-	//printf("Writing to buffer: %p, %d, %s\n", socket, length, buffer);
-	printf("Amount left in buffer: %d\n", rb_available_to_write(rb));
     return actualLength;
 }
 
@@ -809,7 +785,6 @@ void rb_dosend(ring_buffer* rb)
         perror("we should not be here 2");
         return;
     }
-	printf("Reading from buffer: %d, %d\n", socket, length);
     int nwrote = send(socket, buf, length, 0);
 
     if (nwrote < 0)
