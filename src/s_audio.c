@@ -473,9 +473,17 @@ void sys_reopen_audio( void)
 #endif
 #ifdef USEAPI_BELA
     if (sys_audioapi == API_BELA)
-        outcome = bela_open_audio(naudioindev, audioindev, naudioindev,
-            chindev, naudiooutdev, audiooutdev, naudiooutdev, choutdev, rate,
-                audio_blocksize);
+	{
+        int blksize = (audio_blocksize ? audio_blocksize : 64);
+        if (sys_verbose)
+            fprintf(stderr, "blksize %d, advance %d\n", blksize, sys_advance_samples/blksize);
+        outcome = bela_open_audio((naudioindev > 0 ? chindev[0] : 0),
+        (naudiooutdev > 0 ? choutdev[0] : 0), rate, sys_soundin,
+            sys_soundout, blksize, sys_advance_samples/blksize,
+             (naudioindev > 0 ? audioindev[0] : 0),
+              (naudiooutdev > 0 ? audiooutdev[0] : 0),
+               (callback ? sched_audio_callbackfn : 0));
+    }
     else
 #endif
 #ifdef USEAPI_MMIO
@@ -681,6 +689,7 @@ static void audio_getdevs(char *indevlist, int *nindevs,
     {
         bela_getdevs(indevlist, nindevs, outdevlist, noutdevs, canmulti,
             maxndev, devdescsize);
+        *cancallback = 1;
     }
     else
 #endif

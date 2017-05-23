@@ -197,6 +197,15 @@ AS_IF([test x$MACOSX != xyes], [
 	              jack=no)])])
 AM_CONDITIONAL(JACK, test x$jack = xyes)
 
+dnl bela
+AC_ARG_ENABLE([bela],
+		[AS_HELP_STRING([--disable-bela],
+			[do not use bela])],
+    	[bela=$enableval])	
+AS_IF([test x$bela = xyes], [
+    AC_CHECK_LIB(bela,Bela_startAudio,ALSA_LIBS="-lbela",bela=no)])
+AM_CONDITIONAL(BELA, test x$bela = xyes)
+
 dnl portaudio
 AC_ARG_ENABLE([portaudio],
 		[AS_HELP_STRING([--disable-portaudio],
