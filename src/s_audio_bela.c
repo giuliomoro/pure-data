@@ -4,17 +4,21 @@
 #include <stdlib.h>
 #include "s_stuff.h"
 #include <Bela.h>
+#include <math.h>
+#include <string.h>
 
 typedef struct _bela_callback_args_struct
 {
     t_sample* soundin;
     t_sample* soundout;
+    int inchans;
+    int outchans;
     t_audiocallback callbackfn;
 } bela_callback_args;
 
 bool setup(BelaContext* context, void* belaArgs)
 {
-    printf("bela setup\n");
+    return true;
 }
 
 int bela_open_audio(int inchans, int outchans, int rate, t_sample *soundin,
@@ -23,26 +27,56 @@ int bela_open_audio(int inchans, int outchans, int rate, t_sample *soundin,
 {
 	if(callbackfn == NULL)
 	{
-		printf("Error: no callback provided, Bela requires callback. Unable to start audio\n");
+		perror("Error: no callback provided, Bela requires callback. Unable to start audio\n");
 		return 1;
 	}
-    printf("bela_open_audio inchans %d outchans %d rate %d soundin %p soundout %p framesperbuf %d nbuffers %d indeviceno %d, outdeviceno %d, callbackfn %p\n",
-		inchans, outchans, rate, soundin,
-		soundout, framesperbuf, nbuffers,
-		indeviceno, outdeviceno, callbackfn	
-	);
     BelaInitSettings settings;
     Bela_defaultSettings(&settings);
 	settings.periodSize = framesperbuf;
-    settings.headphoneLevel = -12;
+    if(inchans <= 2)
+    {
+        settings.useAnalog = 0;
+    }
+    else
+    {
+        settings.useAnalog = 1;
+        settings.analogOutputsPersist = 0;
+        // if there are <= 4 analog channels,
+        // we increase their sampling rate.
+        // No point in going to 88.2kHz when there are <= 2
+        if(inchans <= 6)
+        {
+            settings.numAnalogInChannels = 4;
+            settings.numAnalogOutChannels = 4;
+        }
+    }
+    if(inchans <= 10)
+    {
+        settings.useDigital = 0;
+    }
+    else
+    {
+        //TODO: bela digital
+        perror("Bela digital I/O not implemented yet\n");
+        return 1;
+    }
     bela_callback_args* belaArgs = (bela_callback_args*)malloc(sizeof(bela_callback_args));
     belaArgs->soundin = soundin;
     belaArgs->soundout = soundout;
+    belaArgs->inchans = inchans;
+    belaArgs->outchans = outchans;
     belaArgs->callbackfn = callbackfn;
-    Bela_initAudio(&settings, (void*)belaArgs);
+    if(Bela_initAudio(&settings, (void*)belaArgs))
+    {
+        perror("Error while initializing Bela audio\n");
+        return 1;
+    }
 
     if(Bela_startAudio())
+    {
+        perror("Error while starting audio\n");
 		return 1;
+    }
 	return 0;
 }
 
@@ -52,45 +86,98 @@ void render(BelaContext* context, void* userArgs)
     t_audiocallback callbackfn = args->callbackfn;
     t_sample* soundin = args->soundin;
     t_sample* soundout = args->soundout;
-    (*callbackfn)();
+    int inchans = args->inchans;
+    int outchans = args->outchans;
+    int inAudioChans = inchans > 2 ? 2 : inchans;
+    int outAudioChans = outchans > 2 ? 2 : outchans;
+    int inAnalogChans = inchans > 10 ? 8 : inchans - 2;
+    int outAnalogChans = outchans > 10 ? 8 : outchans - 2;
+
     unsigned int f;
     unsigned int ch;
-    unsigned int n;
-    static int count = 0;
-    count++;
-    if(count % 1000 == 0)
-    {
-        for(n = 0; n < context->audioFrames * context->audioOutChannels; ++n)
-        {
-            float out = soundout[n];
-            if(out < 0.00001 && out > -0.00001)
-                continue;
-            __real_printf("[%d] %.6f   ", n, out);
-            if(n % 2 == 1)
-                __real_printf("\n");
-        }
-    }
-    if(1)
+    // audio in
     for(f = 0; f < context->audioFrames; ++f)
     {
-        for(ch = 0; ch < context->audioOutChannels; ++ch)
+        for(ch = 0; ch < inAudioChans; ++ch)
         {
-
-            //audioWrite(context, f, ch, soundout[ch * context->audioFrames + f]);
-            audioWrite(context, f, ch, 0.001 * soundout[f * context->audioOutChannels + ch]);
+            soundin[ch * context->audioFrames + f] = audioRead(context, f, ch);
         }
     }
+
+    // analog in
+    if(context->analogSampleRate == 22050)
+    {
+        for(f = 0; f < context->analogFrames; ++f)
+        {
+            for(ch = 0; ch < inAnalogChans; ++ch)
+            {
+                t_sample in = analogRead(context, f, ch);
+                soundin[ch * context->audioFrames + f * 2] = in;
+                soundin[ch * context->audioFrames + f * 2 + 1] = in;
+            }
+        }
+    }
+    else if (context->analogSampleRate == 44100)
+    {
+        for(f = 0; f < context->analogFrames; ++f)
+        {
+            for(ch = 0; ch < inAnalogChans; ++ch)
+            {
+                t_sample in = analogRead(context, f, ch);
+                soundin[ch * context->audioFrames + f] = in;
+            }
+        }
+    }
+    // call the DSP callback
+    (*callbackfn)();
+
+    // audio out
+    for(f = 0; f < context->audioFrames; ++f)
+    {
+        for(ch = 0; ch < outAudioChans; ++ch)
+        {
+            audioWrite(context, f, ch, soundout[ch * context->audioFrames + f]);
+        }
+    }
+
+    // analog out
+    if(context->analogSampleRate == 22050)
+    {
+        for(f = 0; f < context->analogFrames; ++f)
+        {
+            for(ch = 0; ch < outAnalogChans; ++ch)
+            {
+                t_sample out = soundout[ch * context->audioFrames + f];
+                analogWrite(context, f * 2, ch, out);
+                analogWrite(context, f * 2 + 1, ch, out);
+            }
+        }
+    }
+    else if (context->analogSampleRate == 44100)
+    {
+        for(f = 0; f < context->analogFrames; ++f)
+        {
+            for(ch = 0; ch < outAnalogChans; ++ch)
+            {
+                t_sample out = soundout[ch * context->audioFrames + f];
+                analogWrite(context, f, ch, out);
+            }
+        }
+    }
+    //TODO: digital
+
+    // clear the outbut buffer: Pd adds into the old buffer
+    memset((void*)soundout, 0, (size_t)(context->audioFrames * context->audioOutChannels * sizeof(t_sample)));
 }
 
 void cleanup(BelaContext* context, void* userArgs)
 {
-    printf("bela calling cleanup\n");
+    // release the structure that was allocated in bela_open_audio()
     free(userArgs);
 }
 
 void bela_close_audio(void)
 {
-    printf("bela_close_audio\n");
     Bela_stopAudio();
     Bela_cleanupAudio();
 }
@@ -107,7 +194,6 @@ void bela_getdevs(char *indevlist, int *nindevs,
     char *outdevlist, int *noutdevs, int *canmulti, 
         int maxndev, int devdescsize)
 {
-    printf("bela_getdevs\n");
     *nindevs = 1;
     *noutdevs = 1;
     *canmulti = 2;
