@@ -200,7 +200,13 @@ static void poll_fds()
             ring_buffer* rb = sys_fdpoll[i].rb;
             unsigned int size = rb_available_to_write(rb);
             size = size > maxRecv ? maxRecv : size;
-            ret = recv(fd, buf, size, 0);
+            //if callback == socketreceiver_read, do this:
+            if ((void*)*sys_fdpoll[i].fdp_fn == (void*)socketreceiver_read)
+                ret = recv(fd, buf, size, 0);
+            else
+            //otherwise call the actual callback NOW
+                (*sys_fdpoll[i].fdp_fn)(sys_fdpoll[i].fdp_ptr, sys_fdpoll[i].rb, sys_fdpoll[i].fdp_fd);
+
             if(ret < 0)
             {
                 fprintf(stderr, "Error during recv: %s(%d)\n", strerror(-ret), -ret);
