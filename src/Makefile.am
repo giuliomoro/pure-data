@@ -95,7 +95,8 @@ pd_SOURCES = \
     x_time.c \
     x_vexp.c \
     x_vexp_fun.c \
-    x_vexp_if.c
+    x_vexp_if.c \
+	ringbuffer.c
 
 # declared for ASIO
 nodist_EXTRA_pd_SOURCES =

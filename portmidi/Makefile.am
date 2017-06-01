@@ -29,7 +29,7 @@ libportmidi_la_SOURCES += \
 endif
 
 if MACOSX
-AM_CPPFLAGS += -I$(top_srcdir)/portmidi/portmidi/pm_mac
+AM_CPPFLAGS += -I$(top_srcdir)/portmidi/portmidi/pm_mac -Ipm_mac
 libportmidi_la_SOURCES += \
     portmidi/porttime/ptmacosx_cf.c \
     portmidi/pm_mac/pmmac.c \

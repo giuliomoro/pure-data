@@ -88,10 +88,12 @@ static void *netsend_new(t_symbol *s, int argc, t_atom *argv)
     return (x);
 }
 
-static void netsend_readbin(t_netsend *x, int fd)
+#include "ringbuffer.h"
+static void netsend_readbin(t_netsend *x, ring_buffer* rb, int fd)
 {
     unsigned char inbuf[MAXPDSTRING];
     int ret = recv(fd, inbuf, MAXPDSTRING, 0), i;
+    //int ret = rb_recv(rb, inbuf, MAXPDSTRING, 0), i;
     if (!x->x_msgout)
     {
         bug("netsend_readbin");
