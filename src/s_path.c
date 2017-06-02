@@ -59,6 +59,10 @@ sys_remapfilename(const char *from, char *to)
         strcpy(to + strlen(remapPathReplace), start + strlen(remapPathSearch));
         printf("Reading file %s instead of %s\n", to, from);
     }
+	else
+	{
+	    strcpy(to, from);
+	}
 }
 
     /* change '/' characters to the system's native file separator */
