@@ -17,7 +17,8 @@ pdreceive_SOURCES = u_pdreceive.c
 pd_watchdog_SOURCES = s_watchdog.c
 pd_LDADD = 
 pd_SOURCES = g_canvas.c g_graph.c g_text.c g_rtext.c g_array.c g_template.c \
-	g_io.c g_scalar.c g_traversal.c g_guiconnect.c g_readwrite.c g_editor.c \
+    g_io.c g_scalar.c g_traversal.c g_guiconnect.c g_readwrite.c g_editor.c \
+    g_clone.c \
     g_all_guis.c g_bang.c g_hdial.c g_hslider.c g_mycanvas.c g_numbox.c \
     g_toggle.c g_vdial.c g_vslider.c g_vumeter.c \
     m_pd.c m_class.c m_obj.c m_atom.c m_memory.c m_binbuf.c \
@@ -30,7 +31,8 @@ pd_SOURCES = g_canvas.c g_graph.c g_text.c g_rtext.c g_array.c g_template.c \
     d_delay.c d_resample.c  d_soundfile.c \
     x_arithmetic.c x_connective.c x_interface.c x_midi.c x_misc.c \
     x_time.c x_acoustics.c x_net.c x_text.c x_gui.c x_list.c x_array.c \
-    x_scalar.c ringbuffer.c
+    ringbuffer.c x_scalar.c  x_vexp.c x_vexp_if.c x_vexp_fun.c
+nodist_EXTRA_pd_SOURCES =
 
 pd_includedir = ${includedir}/pd
 pd_include_HEADERS = m_pd.h m_imp.h g_canvas.h s_stuff.h g_all_guis.h
@@ -83,6 +85,13 @@ pd_SOURCES += s_audio_oss.c s_midi_oss.c
 endif
 endif
 
+if BELA
+pd_CFLAGS += -DUSEAPI_BELA
+pd_LDADD += -lbela -lrt -lnative -lxenomai -lpthread_rt
+pd_LDFLAGS += -Wl,@/usr/xenomai/lib/posix.wrappers -L/usr/xenomai/lib 
+pd_SOURCES += s_audio_bela.c
+endif
+
 if PORTAUDIO
 pd_CFLAGS += -DUSEAPI_PORTAUDIO  -I$(top_srcdir)/portaudio/include
 pd_LDADD += $(top_builddir)/portaudio/lib/libportaudio.la
@@ -92,6 +101,7 @@ endif
 # ASIO needs to go after PORTAUDIO in order for it to link properly
 if ASIO
 pd_LDADD += $(top_builddir)/asio/libasio.la
+nodist_EXTRA_pd_SOURCES += dummy.cxx
 endif
 
 if PORTMIDI
@@ -155,7 +165,6 @@ if MINGW
 # XP SP1.  WINVER isnt' fine-grained enough for that, so we use the
 # next minor version of Windows, 5.2.  That gives us -DWINVER=0x0502
 pd_CFLAGS += -DWISHAPP='"wish85.exe"' -DWINVER=0x0502
-bin_PROGRAMS += pd-watchdog
 endif
 
 etags: TAGS
