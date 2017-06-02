@@ -1772,7 +1772,7 @@ void canvas_key(t_canvas *x, t_symbol *s, int ac, t_atom *av)
     if (av[1].a_type == A_SYMBOL &&
         !strcmp(av[1].a_w.w_symbol->s_name, "Return"))
             keynum = '\n';
-#ifdef __APPLE__
+//#ifdef __APPLE__
         if (keynum == 30 || keynum == 63232)
             keynum = 0, gotkeysym = gensym("Up");
         else if (keynum == 31 || keynum == 63233)
@@ -1789,7 +1789,7 @@ void canvas_key(t_canvas *x, t_symbol *s, int ac, t_atom *av)
             keynum = 0, gotkeysym = gensym("Prior");
         else if (keynum == 63277)
             keynum = 0, gotkeysym = gensym("Next");
-#endif
+//#endif
     if (gensym("#key")->s_thing && down)
         pd_float(gensym("#key")->s_thing, (t_float)keynum);
     if (gensym("#keyup")->s_thing && !down)
