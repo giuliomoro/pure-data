@@ -198,7 +198,7 @@ AC_ARG_ENABLE([bela],
 			[do not use bela])],
     	[bela=$enableval])	
 AS_IF([test x$bela = xyes], [
-    AC_CHECK_LIB(bela,Bela_startAudio,ALSA_LIBS="-lbela",bela=no)])
+    AC_CHECK_LIB(bela,Bela_startAudio,BELA_LIBS=" -lbela -lrt -lnative -lxenomai -lpthread_rt -lstdc++ ",[echo "Error: libbela does not work"; exit 1;],[-lrt -lnative -lxenomai -lpthread_rt -lstdc++])])
 AM_CONDITIONAL(BELA, test x$bela = xyes)
 
 dnl portaudio
