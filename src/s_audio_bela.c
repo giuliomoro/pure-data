@@ -112,8 +112,8 @@ void _render(BelaContext* context, void* userArgs)
             for(ch = 0; ch < inAnalogChans; ++ch)
             {
                 t_sample in = analogRead(context, f, ch);
-                soundin[ch * context->audioFrames + f * 2] = in;
-                soundin[ch * context->audioFrames + f * 2 + 1] = in;
+                soundin[(ch + 2) * context->audioFrames + f * 2] = in;
+                soundin[(ch + 2) * context->audioFrames + f * 2 + 1] = in;
             }
         }
     }
@@ -121,10 +121,12 @@ void _render(BelaContext* context, void* userArgs)
     {
         for(f = 0; f < context->analogFrames; ++f)
         {
+            static int count = 0;
+            count++;
             for(ch = 0; ch < inAnalogChans; ++ch)
             {
                 t_sample in = analogRead(context, f, ch);
-                soundin[ch * context->audioFrames + f] = in;
+                soundin[(ch + 2)* context->audioFrames + f] = in;
             }
         }
     }
