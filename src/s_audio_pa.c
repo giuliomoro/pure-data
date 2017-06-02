@@ -5,7 +5,7 @@
 /* this file calls Ross Bencina's and Phil Burk's Portaudio package.  It's
     the main way in for Mac OS and, with Michael Casey's help, also into
     ASIO in Windows.
-    
+
     Both blocking and non-blocking call styles are supported.  If non-blocking
     is requested, either we call portaudio in non-blocking mode, or else we
     call portaudio in callback mode and manage our own FIFO se we can offer
@@ -17,7 +17,7 @@
     and polling; the latter seems to work better so far.
 */
 
-/* dolist...  
+/* dolist...
     switch to usleep in s_inter.c
 */
 
@@ -36,13 +36,13 @@
 #include <unistd.h>
 #endif
 
-#ifdef HAVE_ALLOCA_H        /* ifdef nonsense to find include for alloca() */
-# include <alloca.h>        /* linux, mac, mingw, cygwin */
-#elif defined _MSC_VER
-# include <malloc.h>        /* MSVC */
+#ifdef _WIN32
+# include <malloc.h> /* MSVC or mingw on windows */
+#elif defined(__linux__) || defined(__APPLE__)
+# include <alloca.h> /* linux, mac, mingw, cygwin */
 #else
-# include <stddef.h>        /* BSDs for example */
-#endif                      /* end alloca() ifdef nonsense */
+# include <stdlib.h> /* BSDs for example */
+#endif
 
 #if 1
 #define FAKEBLOCKING
@@ -109,7 +109,7 @@ static void pa_init(void)        /* Initialize PortAudio  */
 #endif
 
 
-        if ( err != paNoError ) 
+        if ( err != paNoError )
         {
             post("Error opening audio: %s", err, Pa_GetErrorText(err));
             return;
@@ -120,10 +120,10 @@ static void pa_init(void)        /* Initialize PortAudio  */
 
 static int pa_lowlevel_callback(const void *inputBuffer,
     void *outputBuffer, unsigned long nframes,
-    const PaStreamCallbackTimeInfo *outTime, PaStreamCallbackFlags myflags, 
+    const PaStreamCallbackTimeInfo *outTime, PaStreamCallbackFlags myflags,
     void *userData)
 {
-    int i; 
+    int i;
     unsigned int n, j;
     float *fbuf, *fp2, *fp3, *soundiop;
     if (nframes % DEFDACBLKSIZE)
@@ -172,7 +172,7 @@ static int pa_lowlevel_callback(const void *inputBuffer,
     to poll for us; so far polling seems to work better. */
 static int pa_fifo_callback(const void *inputBuffer,
     void *outputBuffer, unsigned long nframes,
-    const PaStreamCallbackTimeInfo *outTime, PaStreamCallbackFlags myflags, 
+    const PaStreamCallbackTimeInfo *outTime, PaStreamCallbackFlags myflags,
     void *userData)
 {
     /* callback routine for non-callback client... throw samples into
@@ -182,7 +182,7 @@ static int pa_fifo_callback(const void *inputBuffer,
     float *fbuf;
 
 #if CHECKFIFOS
-    if (pa_inchans * sys_ringbuf_getreadavailable(&pa_outring) !=   
+    if (pa_inchans * sys_ringbuf_getreadavailable(&pa_outring) !=
         pa_outchans * sys_ringbuf_getwriteavailable(&pa_inring))
             post("warning: in and out rings unequal (%d, %d)",
                 sys_ringbuf_getreadavailable(&pa_outring),
@@ -241,7 +241,7 @@ PaError pa_open_callback(double sampleRate, int inchannels, int outchannels,
     instreamparams.channelCount = inchannels;
     instreamparams.sampleFormat = paFloat32;
     instreamparams.hostApiSpecificStreamInfo = 0;
-    
+
     outstreamparams.device = outdeviceno;
     outstreamparams.channelCount = outchannels;
     outstreamparams.sampleFormat = paFloat32;
@@ -319,7 +319,7 @@ PaError pa_open_callback(double sampleRate, int inchannels, int outchannels,
         pa_close_audio();
         goto error;
     }
-    sys_dacsr=sampleRate;
+    STUFF->st_dacsr=sampleRate;
     return paNoError;
 error:
     pa_stream = NULL;
@@ -332,12 +332,12 @@ int pa_open_audio(int inchans, int outchans, int rate, t_sample *soundin,
 {
     PaError err;
     int j, devno, pa_indev = -1, pa_outdev = -1;
-    
+
     pa_callback = callbackfn;
     /* fprintf(stderr, "open callback %d\n", (callbackfn != 0)); */
     pa_init();
     /* post("in %d out %d rate %d device %d", inchans, outchans, rate, deviceno); */
-    
+
     if (pa_stream)
         pa_close_audio();
 
@@ -359,8 +359,8 @@ int pa_open_audio(int inchans, int outchans, int rate, t_sample *soundin,
                 devno++;
             }
         }
-    }   
-    
+    }
+
     if (outchans > 0)
     {
         for (j = 0, devno = 0; j < Pa_GetDeviceCount(); j++)
@@ -379,13 +379,13 @@ int pa_open_audio(int inchans, int outchans, int rate, t_sample *soundin,
                 devno++;
             }
         }
-    }   
+    }
 
     if (inchans > 0 && pa_indev == -1)
         inchans = 0;
     if (outchans > 0 && pa_outdev == -1)
         outchans = 0;
-    
+
     if (sys_verbose)
     {
         post("input device %d, channels %d", pa_indev, inchans);
@@ -393,8 +393,8 @@ int pa_open_audio(int inchans, int outchans, int rate, t_sample *soundin,
         post("framesperbuf %d, nbufs %d", framesperbuf, nbuffers);
         post("rate %d", rate);
     }
-    pa_inchans = sys_inchannels = inchans;
-    pa_outchans = sys_outchannels = outchans;
+    pa_inchans = STUFF->st_inchannels = inchans;
+    pa_outchans = STUFF->st_outchannels = outchans;
     pa_soundin = soundin;
     pa_soundout = soundout;
 
@@ -407,7 +407,7 @@ int pa_open_audio(int inchans, int outchans, int rate, t_sample *soundin,
 
     if (! inchans && !outchans)
         return (0);
-    
+
     if (callbackfn)
     {
         pa_callback = callbackfn;
@@ -439,7 +439,7 @@ int pa_open_audio(int inchans, int outchans, int rate, t_sample *soundin,
     }
     pa_started = 0;
     pa_nbuffers = nbuffers;
-    if ( err != paNoError ) 
+    if ( err != paNoError )
     {
         post("Error opening audio: %s", Pa_GetErrorText(err));
         /* Pa_Terminate(); */
@@ -476,19 +476,19 @@ int pa_send_dacs(void)
 #ifndef FAKEBLOCKING
     double timebefore;
 #endif /* FAKEBLOCKING */
-    if (!sys_inchannels && !sys_outchannels || !pa_stream)
-        return (SENDDACS_NO); 
-    conversionbuf = (float *)alloca((sys_inchannels > sys_outchannels?
-        sys_inchannels:sys_outchannels) * DEFDACBLKSIZE * sizeof(float));
+    if (!STUFF->st_inchannels && !STUFF->st_outchannels || !pa_stream)
+        return (SENDDACS_NO);
+    conversionbuf = (float *)alloca((STUFF->st_inchannels > STUFF->st_outchannels?
+        STUFF->st_inchannels:STUFF->st_outchannels) * DEFDACBLKSIZE * sizeof(float));
 
 #ifdef FAKEBLOCKING
-    if (!sys_inchannels)    /* if no input channels sync on output */
+    if (!STUFF->st_inchannels)    /* if no input channels sync on output */
     {
 #ifdef THREADSIGNAL
         pthread_mutex_lock(&pa_mutex);
 #endif
         while (sys_ringbuf_getwriteavailable(&pa_outring) <
-            (long)(sys_outchannels * DEFDACBLKSIZE * sizeof(float)))
+            (long)(STUFF->st_outchannels * DEFDACBLKSIZE * sizeof(float)))
         {
             rtnval = SENDDACS_SLEPT;
 #ifdef THREADSIGNAL
@@ -506,23 +506,23 @@ int pa_send_dacs(void)
 #endif
     }
         /* write output */
-    if (sys_outchannels)
+    if (STUFF->st_outchannels)
     {
-        for (j = 0, fp = sys_soundout, fp2 = conversionbuf;
-            j < sys_outchannels; j++, fp2++)
+        for (j = 0, fp = STUFF->st_soundout, fp2 = conversionbuf;
+            j < STUFF->st_outchannels; j++, fp2++)
                 for (k = 0, fp3 = fp2; k < DEFDACBLKSIZE;
-                    k++, fp++, fp3 += sys_outchannels)
+                    k++, fp++, fp3 += STUFF->st_outchannels)
                         *fp3 = *fp;
         sys_ringbuf_write(&pa_outring, conversionbuf,
-            sys_outchannels*(DEFDACBLKSIZE*sizeof(float)), pa_outbuf);
+            STUFF->st_outchannels*(DEFDACBLKSIZE*sizeof(float)), pa_outbuf);
     }
-    if (sys_inchannels)    /* if there is input sync on it */
+    if (STUFF->st_inchannels)    /* if there is input sync on it */
     {
 #ifdef THREADSIGNAL
         pthread_mutex_lock(&pa_mutex);
 #endif
         while (sys_ringbuf_getreadavailable(&pa_inring) <
-            (long)(sys_inchannels * DEFDACBLKSIZE * sizeof(float)))
+            (long)(STUFF->st_inchannels * DEFDACBLKSIZE * sizeof(float)))
         {
             rtnval = SENDDACS_SLEPT;
 #ifdef THREADSIGNAL
@@ -539,44 +539,44 @@ int pa_send_dacs(void)
         pthread_mutex_unlock(&pa_mutex);
 #endif
     }
-    if (sys_inchannels)
+    if (STUFF->st_inchannels)
     {
         sys_ringbuf_read(&pa_inring, conversionbuf,
-            sys_inchannels*(DEFDACBLKSIZE*sizeof(float)), pa_inbuf);
-        for (j = 0, fp = sys_soundin, fp2 = conversionbuf;
-            j < sys_inchannels; j++, fp2++)
+            STUFF->st_inchannels*(DEFDACBLKSIZE*sizeof(float)), pa_inbuf);
+        for (j = 0, fp = STUFF->st_soundin, fp2 = conversionbuf;
+            j < STUFF->st_inchannels; j++, fp2++)
                 for (k = 0, fp3 = fp2; k < DEFDACBLKSIZE;
-                    k++, fp++, fp3 += sys_inchannels)
+                    k++, fp++, fp3 += STUFF->st_inchannels)
                         *fp = *fp3;
     }
 
 #else /* FAKEBLOCKING */
     timebefore = sys_getrealtime();
         /* write output */
-    if (sys_outchannels)
+    if (STUFF->st_outchannels)
     {
         if (!pa_started)
         {
             memset(conversionbuf, 0,
-                sys_outchannels * DEFDACBLKSIZE * sizeof(float));
+                STUFF->st_outchannels * DEFDACBLKSIZE * sizeof(float));
             for (j = 0; j < pa_nbuffers-1; j++)
                 Pa_WriteStream(pa_stream, conversionbuf, DEFDACBLKSIZE);
         }
-        for (j = 0, fp = sys_soundout, fp2 = conversionbuf;
-            j < sys_outchannels; j++, fp2++)
+        for (j = 0, fp = STUFF->st_soundout, fp2 = conversionbuf;
+            j < STUFF->st_outchannels; j++, fp2++)
                 for (k = 0, fp3 = fp2; k < DEFDACBLKSIZE;
-                    k++, fp++, fp3 += sys_outchannels)
+                    k++, fp++, fp3 += STUFF->st_outchannels)
                         *fp3 = *fp;
         Pa_WriteStream(pa_stream, conversionbuf, DEFDACBLKSIZE);
     }
 
-    if (sys_inchannels)
+    if (STUFF->st_inchannels)
     {
         Pa_ReadStream(pa_stream, conversionbuf, DEFDACBLKSIZE);
-        for (j = 0, fp = sys_soundin, fp2 = conversionbuf;
-            j < sys_inchannels; j++, fp2++)
+        for (j = 0, fp = STUFF->st_soundin, fp2 = conversionbuf;
+            j < STUFF->st_inchannels; j++, fp2++)
                 for (k = 0, fp3 = fp2; k < DEFDACBLKSIZE;
-                    k++, fp++, fp3 += sys_inchannels)
+                    k++, fp++, fp3 += STUFF->st_inchannels)
                         *fp = *fp3;
     }
     if (sys_getrealtime() - timebefore > 0.002)
@@ -586,13 +586,14 @@ int pa_send_dacs(void)
 #endif /* FAKEBLOCKING */
     pa_started = 1;
 
-    memset(sys_soundout, 0, DEFDACBLKSIZE*sizeof(t_sample)*sys_outchannels);
+    memset(STUFF->st_soundout, 0,
+        DEFDACBLKSIZE*sizeof(t_sample)*STUFF->st_outchannels);
     return (rtnval);
 }
 
     /* scanning for devices */
 void pa_getdevs(char *indevlist, int *nindevs,
-    char *outdevlist, int *noutdevs, int *canmulti, 
+    char *outdevlist, int *noutdevs, int *canmulti,
         int maxndev, int devdescsize)
 {
     int i, nin = 0, nout = 0, ndev;

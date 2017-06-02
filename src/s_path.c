@@ -8,7 +8,7 @@
  *
  * Generalized by MSP to provide an open_via_path function
  * and lists of files for all purposes.
- */ 
+ */
 
 /* #define DEBUG(x) x */
 #define DEBUG(x)
@@ -23,13 +23,13 @@
 #include <windows.h>
 #endif
 
-#ifdef HAVE_ALLOCA_H        /* ifdef nonsense to find include for alloca() */
-# include <alloca.h>        /* linux, mac, mingw, cygwin */
-#elif defined _MSC_VER
-# include <malloc.h>        /* MSVC */
+#ifdef _WIN32
+# include <malloc.h> /* MSVC or mingw on windows */
+#elif defined(__linux__) || defined(__APPLE__)
+# include <alloca.h> /* linux, mac, mingw, cygwin */
 #else
-# include <stddef.h>        /* BSDs for example */
-#endif                      /* end alloca() ifdef nonsense */
+# include <stdlib.h> /* BSDs for example */
+#endif
 
 #include <string.h>
 #include "m_pd.h"
@@ -47,16 +47,12 @@
 # define stat  stat64
 #endif
 
-t_namelist *sys_externlist;
-t_namelist *sys_searchpath;
-t_namelist *sys_staticpath;
-t_namelist *sys_helppath;
 
     /* change '/' characters to the system's native file separator */
 void sys_bashfilename(const char *from, char *to)
 {
     char c;
-    while (c = *from++)
+    while ((c = *from++))
     {
 #ifdef _WIN32
         if (c == '/') c = '\\';
@@ -70,7 +66,7 @@ void sys_bashfilename(const char *from, char *to)
 void sys_unbashfilename(const char *from, char *to)
 {
     char c;
-    while (c = *from++)
+    while ((c = *from++))
     {
 #ifdef _WIN32
         if (c == '\\') c = '/';
@@ -93,7 +89,7 @@ int sys_isabsolutepath(const char *dir)
     }
     else
     {
-        return 0;            
+        return 0;
     }
 }
 
@@ -107,7 +103,7 @@ static void sys_expandpath(const char *from, char *to, int bufsize)
 #else
         const char *home = getenv("HOME");
 #endif
-        if (home) 
+        if (home)
         {
             strncpy(to, home, bufsize);
             to[bufsize-1] = 0;
@@ -129,14 +125,14 @@ static void sys_expandpath(const char *from, char *to, int bufsize)
         strncpy(to, buf, bufsize);
         to[bufsize-1] = 0;
     }
-#endif    
+#endif
 }
 
 /*******************  Utility functions used below ******************/
 
 /*!
  * \brief copy until delimiter
- * 
+ *
  * \arg to destination buffer
  * \arg to_len destination buffer length
  * \arg from source buffer
@@ -177,7 +173,10 @@ t_namelist *namelist_append(t_namelist *listwas, const char *s, int allowdup)
         for (nl = listwas; ;)
         {
             if (!allowdup && !strcmp(nl->nl_string, s))
+            {
+                freebytes(nl2->nl_string, strlen(nl2->nl_string) + 1);
                 return (listwas);
+            }
             if (!nl->nl_next)
                 break;
             nl = nl->nl_next;
@@ -200,7 +199,7 @@ t_namelist *namelist_append_files(t_namelist *listwas, const char *s)
     const char *npos;
     char temp[MAXPDSTRING];
     t_namelist *nl = listwas, *rtn = listwas;
-    
+
     npos = s;
     do
     {
@@ -237,34 +236,37 @@ int sys_usestdpath = 1;
 void sys_setextrapath(const char *p)
 {
     char pathbuf[MAXPDSTRING];
-    namelist_free(sys_staticpath);
+    namelist_free(STUFF->st_staticpath);
     /* add standard place for users to install stuff first */
 #ifdef __gnu_linux__
+    sys_expandpath("~/.local/lib/pd/extra/", pathbuf, MAXPDSTRING);
+    STUFF->st_staticpath = namelist_append(0, pathbuf, 0);
     sys_expandpath("~/pd-externals", pathbuf, MAXPDSTRING);
-    sys_staticpath = namelist_append(0, pathbuf, 0);
-    sys_staticpath = namelist_append(sys_staticpath, "/usr/local/lib/pd-externals", 0);
+    STUFF->st_staticpath = namelist_append(STUFF->st_staticpath, pathbuf, 0);
+    STUFF->st_staticpath = namelist_append(STUFF->st_staticpath,
+        "/usr/local/lib/pd-externals", 0);
 #endif
 
 #ifdef __APPLE__
     sys_expandpath("~/Library/Pd", pathbuf, MAXPDSTRING);
-    sys_staticpath = namelist_append(0, pathbuf, 0);
-    sys_staticpath = namelist_append(sys_staticpath, "/Library/Pd", 0);
+    STUFF->st_staticpath = namelist_append(0, pathbuf, 0);
+    STUFF->st_staticpath = namelist_append(STUFF->st_staticpath, "/Library/Pd", 0);
 #endif
 
 #ifdef _WIN32
-    sys_expandpath("%CommonProgramFiles%/Pd", pathbuf, MAXPDSTRING);
-    sys_staticpath = namelist_append(0, pathbuf, 0);
     sys_expandpath("%AppData%/Pd", pathbuf, MAXPDSTRING);
-    sys_staticpath = namelist_append(sys_staticpath, pathbuf, 0);
+    STUFF->st_staticpath = namelist_append(0, pathbuf, 0);
+    sys_expandpath("%CommonProgramFiles%/Pd", pathbuf, MAXPDSTRING);
+    STUFF->st_staticpath = namelist_append(STUFF->st_staticpath, pathbuf, 0);
 #endif
     /* add built-in "extra" path last so its checked last */
-    sys_staticpath = namelist_append(sys_staticpath, p, 0);
+    STUFF->st_staticpath = namelist_append(STUFF->st_staticpath, p, 0);
 }
 
     /* try to open a file in the directory "dir", named "name""ext",
     for reading.  "Name" may have slashes.  The directory is copied to
     "dirresult" which must be at least "size" bytes.  "nameresult" is set
-    to point to the filename (copied elsewhere into the same buffer). 
+    to point to the filename (copied elsewhere into the same buffer).
     The "bin" flag requests opening for binary (which only makes a difference
     on Windows). */
 
@@ -312,7 +314,7 @@ int sys_trytoopenone(const char *dir, const char *name, const char* ext,
             }
             else *nameresult = dirresult;
 
-            return (fd);  
+            return (fd);
         }
     }
     else
@@ -334,7 +336,7 @@ int sys_open_absolute(const char *name, const char* ext,
         if (!z)
             return (0);
         dirlen = z - name;
-        if (dirlen > MAXPDSTRING-1) 
+        if (dirlen > MAXPDSTRING-1)
             dirlen = MAXPDSTRING-1;
         strncpy(dirbuf, name, dirlen);
         dirbuf[dirlen] = 0;
@@ -366,7 +368,7 @@ static int do_open_via_path(const char *dir, const char *name,
         /* first check if "name" is absolute (and if so, try to open) */
     if (sys_open_absolute(name, ext, dirresult, nameresult, size, bin, &fd))
         return (fd);
-    
+
         /* otherwise "name" is relative; try the directory "dir" first. */
     if ((fd = sys_trytoopenone(dir, name, ext,
         dirresult, nameresult, size, bin)) >= 0)
@@ -380,7 +382,7 @@ static int do_open_via_path(const char *dir, const char *name,
 
         /* next look in built-in paths like "extra" */
     if (sys_usestdpath)
-        for (nl = sys_staticpath; nl; nl = nl->nl_next)
+        for (nl = STUFF->st_staticpath; nl; nl = nl->nl_next)
             if ((fd = sys_trytoopenone(nl->nl_string, name, ext,
                 dirresult, nameresult, size, bin)) >= 0)
                     return (fd);
@@ -395,7 +397,7 @@ int open_via_path(const char *dir, const char *name, const char *ext,
     char *dirresult, char **nameresult, unsigned int size, int bin)
 {
     return (do_open_via_path(dir, name, ext, dirresult, nameresult,
-        size, bin, sys_searchpath));
+        size, bin, STUFF->st_searchpath));
 }
 
     /* open a file with a UTF-8 filename
@@ -450,7 +452,7 @@ int sys_open(const char *path, int oflag, ...)
            -> http://www.mail-archive.com/bug-gnulib@gnu.org/msg14212.html
            -> http://bugs.debian.org/647345
         */
-        
+
         imode = va_arg (ap, int);
         mode = (mode_t)imode;
         va_end(ap);
@@ -503,16 +505,16 @@ void open_via_helppath(const char *name, const char *dir)
     if (strlen(realname) > 3 && !strcmp(realname+strlen(realname)-3, ".pd"))
         realname[strlen(realname)-3] = 0;
     strcat(realname, "-help.pd");
-    if ((fd = do_open_via_path(usedir, realname, "", dirbuf, &basename, 
-        MAXPDSTRING, 0, sys_helppath)) >= 0)
+    if ((fd = do_open_via_path(usedir, realname, "", dirbuf, &basename,
+        MAXPDSTRING, 0, STUFF->st_helppath)) >= 0)
             goto gotone;
 
         /* 2. "help-objectname.pd" */
     strcpy(realname, "help-");
     strncat(realname, name, MAXPDSTRING-10);
     realname[MAXPDSTRING-1] = 0;
-    if ((fd = do_open_via_path(usedir, realname, "", dirbuf, &basename, 
-        MAXPDSTRING, 0, sys_helppath)) >= 0)
+    if ((fd = do_open_via_path(usedir, realname, "", dirbuf, &basename,
+        MAXPDSTRING, 0, STUFF->st_helppath)) >= 0)
             goto gotone;
 
     post("sorry, couldn't find help patch for \"%s\"", name);
@@ -543,15 +545,15 @@ int sys_rcfile(void)
     char* buffer;
     char  fname[MAXPDSTRING], buf[1000], *home = getenv("HOME");
     int retval = 1; /* that's what we will return at the end; for now, let's think it'll be an error */
- 
+
     /* initialize rc-arg-array so we can safely clean up at the end */
     for (i = 1; i < NUMARGS-1; i++)
       rcargv[i]=0;
 
 
     /* parse a startup file */
-    
-    *fname = '\0'; 
+
+    *fname = '\0';
 
     strncat(fname, home? home : ".", MAXPDSTRING-10);
     strcat(fname, "/");
@@ -582,7 +584,6 @@ int sys_rcfile(void)
 
     /* parse the options */
 
-    fclose(file);
     if (sys_verbose)
     {
         if (rcargc)
@@ -603,18 +604,23 @@ int sys_rcfile(void)
 
 
  cleanup: /* prevent memleak */
+    fclose(file);
+
     for (i = 1; i < NUMARGS-1; i++)
       if(rcargv[i])free(rcargv[i]);
-    
+
     return(retval);
 }
 #endif /* _WIN32 */
 
 void sys_doflags( void)
 {
-    int i, beginstring = 0, state = 0, len = strlen(sys_flags->s_name);
+    int i, beginstring = 0, state = 0, len;
     int rcargc = 0;
     char *rcargv[MAXPDSTRING];
+    if (!sys_flags)
+        sys_flags = &s_;
+    len = strlen(sys_flags->s_name);
     if (len > MAXPDSTRING)
     {
         error("flags: %s: too long", sys_flags->s_name);
@@ -692,9 +698,9 @@ void sys_set_searchpath( void)
     t_namelist *nl;
 
     sys_gui("set ::tmp_path {}\n");
-    for (nl = sys_searchpath, i = 0; nl; nl = nl->nl_next, i++)
+    for (nl = STUFF->st_searchpath, i = 0; nl; nl = nl->nl_next, i++)
         sys_vgui("lappend ::tmp_path {%s}\n", nl->nl_string);
-    sys_gui("set ::sys_searchpath $::tmp_path\n");
+    sys_gui("set ::STUFF->st_searchpath $::tmp_path\n");
 }
 
     /* send the hard-coded search path to pd-gui */
@@ -704,7 +710,7 @@ void sys_set_extrapath( void)
     t_namelist *nl;
 
     sys_gui("set ::tmp_path {}\n");
-    for (nl = sys_staticpath, i = 0; nl; nl = nl->nl_next, i++)
+    for (nl = STUFF->st_staticpath, i = 0; nl; nl = nl->nl_next, i++)
         sys_vgui("lappend ::tmp_path {%s}\n", nl->nl_string);
     sys_gui("set ::sys_staticpath $::tmp_path\n");
 }
@@ -723,15 +729,16 @@ void glob_start_path_dialog(t_pd *dummy)
 void glob_path_dialog(t_pd *dummy, t_symbol *s, int argc, t_atom *argv)
 {
     int i;
-    namelist_free(sys_searchpath);
-    sys_searchpath = 0;
+    namelist_free(STUFF->st_searchpath);
+    STUFF->st_searchpath = 0;
     sys_usestdpath = atom_getintarg(0, argc, argv);
     sys_verbose = atom_getintarg(1, argc, argv);
     for (i = 0; i < argc-2; i++)
     {
         t_symbol *s = sys_decodedialog(atom_getsymbolarg(i+2, argc, argv));
         if (*s->s_name)
-            sys_searchpath = namelist_append_files(sys_searchpath, s->s_name);
+            STUFF->st_searchpath =
+                namelist_append_files(STUFF->st_searchpath, s->s_name);
     }
 }
 
@@ -741,9 +748,10 @@ void sys_set_startup( void)
     int i;
     t_namelist *nl;
 
-    sys_vgui("set ::startup_flags {%s}\n", sys_flags->s_name);
+    sys_vgui("set ::startup_flags {%s}\n",
+        (sys_flags? sys_flags->s_name : ""));
     sys_gui("set ::startup_libraries {}\n");
-    for (nl = sys_externlist, i = 0; nl; nl = nl->nl_next, i++)
+    for (nl = STUFF->st_externlist, i = 0; nl; nl = nl->nl_next, i++)
         sys_vgui("lappend ::startup_libraries {%s}\n", nl->nl_string);
 }
 
@@ -754,7 +762,7 @@ void glob_start_startup_dialog(t_pd *dummy)
 
     sys_set_startup();
     sprintf(buf, "pdtk_startup_dialog %%s %d \"%s\"\n", sys_defeatrt,
-        sys_flags->s_name);
+        (sys_flags? sys_flags->s_name : ""));
     gfxstub_new(&glob_pdobject, (void *)glob_start_startup_dialog, buf);
 }
 
@@ -762,15 +770,16 @@ void glob_start_startup_dialog(t_pd *dummy)
 void glob_startup_dialog(t_pd *dummy, t_symbol *s, int argc, t_atom *argv)
 {
     int i;
-    namelist_free(sys_externlist);
-    sys_externlist = 0;
+    namelist_free(STUFF->st_externlist);
+    STUFF->st_externlist = 0;
     sys_defeatrt = atom_getintarg(0, argc, argv);
     sys_flags = sys_decodedialog(atom_getsymbolarg(1, argc, argv));
     for (i = 0; i < argc-2; i++)
     {
         t_symbol *s = sys_decodedialog(atom_getsymbolarg(i+2, argc, argv));
         if (*s->s_name)
-            sys_externlist = namelist_append_files(sys_externlist, s->s_name);
+            STUFF->st_externlist =
+                namelist_append_files(STUFF->st_externlist, s->s_name);
     }
 }
 

@@ -8,7 +8,7 @@
 
 #include <string.h>
 #include <stdio.h>
-extern t_pd *newest;
+#include <stdlib.h>
 
 /* -------------------------- int ------------------------------ */
 static t_class *pdint_class;
@@ -75,7 +75,7 @@ static void *pdfloat_new(t_pd *dummy, t_float f)
     x->x_f = f;
     outlet_new(&x->x_obj, &s_float);
     floatinlet_new(&x->x_obj, &x->x_f);
-    newest = &x->x_obj.ob_pd;
+    pd_this->pd_newest = &x->x_obj.ob_pd;
     return (x);
 }
 
@@ -94,6 +94,20 @@ static void pdfloat_float(t_pdfloat *x, t_float f)
     outlet_float(x->x_obj.ob_outlet, x->x_f = f);
 }
 
+#ifdef _MSC_VER
+#define strtof _atoldbl
+#endif
+
+static void pdfloat_symbol(t_pdfloat *x, t_symbol *s)
+{
+    t_float f = 0.0f;
+    char *str_end = NULL;
+    f = strtof(s->s_name, &str_end);
+    if (f == 0 && s->s_name == str_end)
+        pd_error(x, "Couldn't convert %s to float.", s->s_name);
+    else outlet_float(x->x_obj.ob_outlet, x->x_f = f);
+}
+
 static void pdfloat_send(t_pdfloat *x, t_symbol *s)
 {
     if (s->s_thing)
@@ -110,6 +124,7 @@ void pdfloat_setup(void)
         A_SYMBOL, 0);
     class_addbang(pdfloat_class, pdfloat_bang);
     class_addfloat(pdfloat_class, (t_method)pdfloat_float);
+    class_addsymbol(pdfloat_class, (t_method)pdfloat_symbol);
 }
 
 /* -------------------------- symbol ------------------------------ */
@@ -127,7 +142,7 @@ static void *pdsymbol_new(t_pd *dummy, t_symbol *s)
     x->x_s = s;
     outlet_new(&x->x_obj, &s_symbol);
     symbolinlet_new(&x->x_obj, &x->x_s);
-    newest = &x->x_obj.ob_pd;
+    pd_this->pd_newest = &x->x_obj.ob_pd;
     return (x);
 }
 
@@ -151,7 +166,7 @@ static void pdsymbol_anything(t_pdsymbol *x, t_symbol *s, int ac, t_atom *av)
     Otherwise it's not clear what we should do so we just go for the
     "anything" method.  LATER figure out if there are other places where
     empty lists aren't equivalent to "bang"???  Should Pd's message passer
-    always check and call the more specific method, or should it be the 
+    always check and call the more specific method, or should it be the
     object's responsibility?  Dunno... */
 static void pdsymbol_list(t_pdsymbol *x, t_symbol *s, int ac, t_atom *av)
 {
@@ -183,7 +198,7 @@ static void *bang_new(t_pd *dummy)
 {
     t_bang *x = (t_bang *)pd_new(bang_class);
     outlet_new(&x->x_obj, &s_bang);
-    newest = &x->x_obj.ob_pd;
+    pd_this->pd_newest = &x->x_obj.ob_pd;
     return (x);
 }
 
@@ -326,7 +341,7 @@ static void receive_free(t_receive *x)
 
 static void receive_setup(void)
 {
-    receive_class = class_new(gensym("receive"), (t_newmethod)receive_new, 
+    receive_class = class_new(gensym("receive"), (t_newmethod)receive_new,
         (t_method)receive_free, sizeof(t_receive), CLASS_NOINLET, A_DEFSYM, 0);
     class_addcreator((t_newmethod)receive_new, gensym("r"), A_DEFSYM, 0);
     class_addbang(receive_class, receive_bang);
@@ -503,7 +518,7 @@ static void route_anything(t_route *x, t_symbol *sel, int argc, t_atom *argv)
 {
     t_routeelement *e;
     int nelement;
-    if (x->x_type == A_SYMBOL) 
+    if (x->x_type == A_SYMBOL)
     {
         for (nelement = x->x_nelement, e = x->x_vec; nelement--; e++)
             if (e->e_w.w_symbol == sel)
@@ -1467,19 +1482,19 @@ void value_release(t_symbol *s)
 }
 
 /*
- * value_getfloat -- obtain the float value of a "value" object 
+ * value_getfloat -- obtain the float value of a "value" object
  *                  return 0 on success, 1 otherwise
  */
 int
-value_getfloat(t_symbol *s, t_float *f) 
+value_getfloat(t_symbol *s, t_float *f)
 {
     t_vcommon *c = (t_vcommon *)pd_findbyclass(s, vcommon_class);
     if (!c)
         return (1);
     *f = c->c_f;
-    return (0); 
+    return (0);
 }
- 
+
 /*
  * value_setfloat -- set the float value of a "value" object
  *                  return 0 on success, 1 otherwise
@@ -1490,8 +1505,8 @@ value_setfloat(t_symbol *s, t_float f)
     t_vcommon *c = (t_vcommon *)pd_findbyclass(s, vcommon_class);
     if (!c)
         return (1);
-    c->c_f = f; 
-    return (0); 
+    c->c_f = f;
+    return (0);
 }
 
 static void vcommon_float(t_vcommon *x, t_float f)

@@ -33,7 +33,7 @@
 #endif
 
 int sys_defeatrt;
-t_symbol *sys_flags = &s_;
+t_symbol *sys_flags;
 void sys_doflags( void);
 
     /* Hmm... maybe better would be to #if on not-apple-or-windows  */
@@ -54,11 +54,11 @@ static void sys_initloadpreferences( void)
     char default_prefs_file[MAXPDSTRING];
     struct stat statbuf;
 
-    snprintf(default_prefs_file, MAXPDSTRING, "%s/default.pdsettings", 
+    snprintf(default_prefs_file, MAXPDSTRING, "%s/default.pdsettings",
         sys_libdir->s_name);
-    snprintf(user_prefs_file, MAXPDSTRING, "%s/.pdsettings", 
+    snprintf(user_prefs_file, MAXPDSTRING, "%s/.pdsettings",
         (homedir ? homedir : "."));
-    if (stat(user_prefs_file, &statbuf) == 0) 
+    if (stat(user_prefs_file, &statbuf) == 0)
         strncpy(filenamebuf, user_prefs_file, MAXPDSTRING);
     else if (stat(default_prefs_file, &statbuf) == 0)
         strncpy(filenamebuf, default_prefs_file, MAXPDSTRING);
@@ -276,7 +276,7 @@ static void sys_initsavepreferences( void)
 static void sys_putpreference(const char *key, const char *value)
 {
     char cmdbuf[MAXPDSTRING];
-    snprintf(cmdbuf, MAXPDSTRING, 
+    snprintf(cmdbuf, MAXPDSTRING,
         "defaults write org.puredata.pd %s \"%s\" 2> /dev/null\n", key, value);
     system(cmdbuf);
 }
@@ -295,7 +295,7 @@ void sys_loadpreferences( void)
     int nmidiindev, midiindev[MAXMIDIINDEV];
     int nmidioutdev, midioutdev[MAXMIDIOUTDEV];
     int i, rate = 0, advance = -1, callback = 0, blocksize = 0,
-        api, nolib, maxi;
+        api, midiapi, nolib, maxi;
     char prefbuf[MAXPDSTRING], keybuf[80];
 
     sys_initloadpreferences();
@@ -321,7 +321,7 @@ void sys_loadpreferences( void)
             if (sscanf(prefbuf, "%d %d", &audioindev[i], &chindev[i]) < 2)
                 break;
                 /* possibly override device number if the device name was
-                also saved and if it matches one we have now */        
+                also saved and if it matches one we have now */
             sprintf(keybuf, "audioindevname%d", i+1);
             if (sys_getpreference(keybuf, prefbuf, MAXPDSTRING)
                 && (devn = sys_audiodevnametonumber(0, prefbuf)) >= 0)
@@ -366,8 +366,11 @@ void sys_loadpreferences( void)
     sys_set_audio_settings(naudioindev, audioindev, naudioindev, chindev,
         naudiooutdev, audiooutdev, naudiooutdev, choutdev, rate, advance,
         callback, blocksize);
-        
+
         /* load MIDI preferences */
+    if (sys_getpreference("midiapi", prefbuf, MAXPDSTRING)
+        && sscanf(prefbuf, "%d", &midiapi) > 0)
+            sys_set_midi_api(midiapi);
         /* JMZ/MB: brackets for initializing */
     if (sys_getpreference("nomidiin", prefbuf, MAXPDSTRING) &&
         (!strcmp(prefbuf, ".") || !strcmp(prefbuf, "True")))
@@ -423,7 +426,8 @@ void sys_loadpreferences( void)
         sprintf(keybuf, "path%d", i+1);
         if (!sys_getpreference(keybuf, prefbuf, MAXPDSTRING))
             break;
-        sys_searchpath = namelist_append_files(sys_searchpath, prefbuf);
+        STUFF->st_searchpath =
+            namelist_append_files(STUFF->st_searchpath, prefbuf);
     }
     if (sys_getpreference("standardpath", prefbuf, MAXPDSTRING))
         sscanf(prefbuf, "%d", &sys_usestdpath);
@@ -439,7 +443,7 @@ void sys_loadpreferences( void)
         sprintf(keybuf, "loadlib%d", i+1);
         if (!sys_getpreference(keybuf, prefbuf, MAXPDSTRING))
             break;
-        sys_externlist = namelist_append_files(sys_externlist, prefbuf);
+        STUFF->st_externlist = namelist_append_files(STUFF->st_externlist, prefbuf);
     }
     if (sys_getpreference("defeatrt", prefbuf, MAXPDSTRING))
         sscanf(prefbuf, "%d", &sys_defeatrt);
@@ -462,6 +466,8 @@ void sys_loadpreferences( void)
         sys_hipriority = 1;
 #endif
 #endif
+    if (sys_getpreference("zoom", prefbuf, MAXPDSTRING))
+        sscanf(prefbuf, "%d", &sys_zoom_open);
 }
 
 void glob_savepreferences(t_pd *dummy)
@@ -522,6 +528,9 @@ void glob_savepreferences(t_pd *dummy)
     sys_putpreference("blocksize", buf1);
 
         /* MIDI settings */
+    sprintf(buf1, "%d", sys_midiapi);
+    sys_putpreference("midiapi", buf1);
+
     sys_get_midi_params(&nmidiindev, midiindev, &nmidioutdev, midioutdev);
     sys_putpreference("nomidiin", (nmidiindev <= 0 ? "True" : "False"));
     for (i = 0; i < nmidiindev; i++)
@@ -551,7 +560,7 @@ void glob_savepreferences(t_pd *dummy)
 
     for (i = 0; 1; i++)
     {
-        char *pathelem = namelist_get(sys_searchpath, i);
+        char *pathelem = namelist_get(STUFF->st_searchpath, i);
         if (!pathelem)
             break;
         sprintf(buf1, "path%d", i+1);
@@ -563,11 +572,11 @@ void glob_savepreferences(t_pd *dummy)
     sys_putpreference("standardpath", buf1);
     sprintf(buf1, "%d", sys_verbose);
     sys_putpreference("verbose", buf1);
-    
+
         /* startup */
     for (i = 0; 1; i++)
     {
-        char *pathelem = namelist_get(sys_externlist, i);
+        char *pathelem = namelist_get(STUFF->st_externlist, i);
         if (!pathelem)
             break;
         sprintf(buf1, "loadlib%d", i+1);
@@ -577,8 +586,11 @@ void glob_savepreferences(t_pd *dummy)
     sys_putpreference("nloadlib", buf1);
     sprintf(buf1, "%d", sys_defeatrt);
     sys_putpreference("defeatrt", buf1);
-    sys_putpreference("flags", 
+    sys_putpreference("flags",
         (sys_flags ? sys_flags->s_name : ""));
+        /* misc */
+    sprintf(buf1, "%d", sys_zoom_open);
+    sys_putpreference("zoom", buf1);
+
     sys_donesavepreferences();
-    
 }

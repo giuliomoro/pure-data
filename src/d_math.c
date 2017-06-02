@@ -67,6 +67,7 @@ static void clip_setup(void)
 #define DUMTAB1SIZE 256
 #define DUMTAB2SIZE 1024
 
+/* These are only written at setup time when there's a global lock in place. */
 static float rsqrt_exptab[DUMTAB1SIZE], rsqrt_mantissatab[DUMTAB2SIZE];
 
 static void init_rsqrt(void)
@@ -80,12 +81,12 @@ static void init_rsqrt(void)
         } u;
         int32_t l = (i ? (i == DUMTAB1SIZE-1 ? DUMTAB1SIZE-2 : i) : 1)<< 23;
         u.l = l;
-        rsqrt_exptab[i] = 1./sqrt(u.f);   
+        rsqrt_exptab[i] = 1./sqrt(u.f);
     }
     for (i = 0; i < DUMTAB2SIZE; i++)
     {
         float f = 1 + (1./DUMTAB2SIZE) * i;
-        rsqrt_mantissatab[i] = 1./sqrt(f);      
+        rsqrt_mantissatab[i] = 1./sqrt(f);
     }
 }
 
@@ -139,14 +140,18 @@ static t_int *sigrsqrt_perform(t_int *w)
     t_sample *in = *(t_sample **)(w+1), *out = *(t_sample **)(w+2);
     t_int n = *(t_int *)(w+3);
     while (n--)
-    {   
-        t_sample f = *in;
-        long l = *(long *)(in++);
+    {
+        t_sample f = *in++;
+        union {
+          float f;
+          long l;
+        } u;
+        u.f = f;
         if (f < 0) *out++ = 0;
         else
         {
-            t_sample g = rsqrt_exptab[(l >> 23) & 0xff] *
-                rsqrt_mantissatab[(l >> 13) & 0x3ff];
+            t_sample g = rsqrt_exptab[(u.l >> 23) & 0xff] *
+                rsqrt_mantissatab[(u.l >> 13) & 0x3ff];
             *out++ = 1.5 * g - 0.5 * g * g * g * f;
         }
     }
@@ -194,14 +199,18 @@ t_int *sigsqrt_perform(t_int *w)    /* not static; also used in d_fft.c */
     t_sample *in = *(t_sample **)(w+1), *out = *(t_sample **)(w+2);
     t_int n = *(t_int *)(w+3);
     while (n--)
-    {   
-        t_sample f = *in;
-        long l = *(long *)(in++);
+    {
+        t_sample f = *in++;
+        union {
+          float f;
+          long l;
+        } u;
+        u.f = f;
         if (f < 0) *out++ = 0;
         else
         {
-            t_sample g = rsqrt_exptab[(l >> 23) & 0xff] *
-                rsqrt_mantissatab[(l >> 13) & 0x3ff];
+            t_sample g = rsqrt_exptab[(u.l >> 23) & 0xff] *
+                rsqrt_mantissatab[(u.l >> 13) & 0x3ff];
             *out++ = f * (1.5 * g - 0.5 * g * g * g * f);
         }
     }
@@ -246,7 +255,7 @@ static t_int *sigwrap_perform(t_int *w)
     t_sample *in = *(t_sample **)(w+1), *out = *(t_sample **)(w+2);
     t_int n = *(t_int *)(w+3);
     while (n--)
-    {   
+    {
         t_sample f = *in++;
         int k = f;
         if (f > 0) *out++ = f-k;
@@ -454,7 +463,7 @@ static void rmstodb_tilde_dsp(t_rmstodb_tilde *x, t_signal **sp)
 
 void rmstodb_tilde_setup(void)
 {
-    rmstodb_tilde_class = class_new(gensym("rmstodb~"), 
+    rmstodb_tilde_class = class_new(gensym("rmstodb~"),
         (t_newmethod)rmstodb_tilde_new, 0, sizeof(t_rmstodb_tilde), 0, 0);
     CLASS_MAINSIGNALIN(rmstodb_tilde_class, t_rmstodb_tilde, x_f);
     class_addmethod(rmstodb_tilde_class, (t_method)rmstodb_tilde_dsp,
@@ -662,10 +671,11 @@ typedef struct _log_tilde
     t_float x_f;
 } t_log_tilde;
 
-static void *log_tilde_new( void)
+static void *log_tilde_new(t_floatarg f)
 {
     t_log_tilde *x = (t_log_tilde *)pd_new(log_tilde_class);
-    inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_signal, &s_signal);
+    pd_float(
+        (t_pd *)inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_signal, &s_signal), f);
     outlet_new(&x->x_obj, &s_signal);
     x->x_f = 0;
     return (x);

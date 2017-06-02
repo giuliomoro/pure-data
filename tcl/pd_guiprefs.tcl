@@ -174,6 +174,13 @@ proc ::pd_guiprefs::write_config_aqua {data {adomain} {akey} {arr false}} {
         set escaped [escape_for_plist $data]
         exec defaults write $adomain $akey '$escaped'
     }
+
+    # Disable window state saving by default for 10.7+ as there is a chance
+    # pd will hang on start due to conflicting patch resources until the state
+    # is purged. State saving will still work, it just has to be explicitly
+    # asked for by holding the Option/Alt button when quitting via the File
+    # menu or with the Cmd+Q key binding.
+    exec defaults write $adomain NSQuitAlwaysKeepsWindows -bool false
 }
 
 # ------------------------------------------------------------------------------
@@ -217,9 +224,13 @@ proc ::pd_guiprefs::write_config_x11 {data {adomain} {akey}} {
 # linux only! : look for pd config directory and create it if needed
 #
 proc ::pd_guiprefs::prepare_configdir {} {
-    if {[file isdirectory $::recentfiles_domain] != 1} {
-        file mkdir $::recentfiles_domain
-        ::pdwindow::debug "$::recentfiles_domain was created.\n"
+    if { [catch {
+        if {[file isdirectory $::recentfiles_domain] != 1} {
+            file mkdir $::recentfiles_domain
+            ::pdwindow::debug "$::recentfiles_domain was created.\n"
+            }
+    }]} {
+                ::pdwindow::error "$::recentfiles_domain was *NOT* created.\n"
     }
 }
 
@@ -234,6 +245,7 @@ proc ::pd_guiprefs::plist_array_to_tcl_list {arr} {
     regsub -all -- {^\(} $filelist {} filelist
     regsub -all -- {\)$} $filelist {} filelist
     regsub -line -- {^'(.*)'$} $filelist {\1} filelist
+    regsub -all -- {\\\\U} $filelist {\\u} filelist
 
     foreach file $filelist {
         set filename [regsub -- {,$} $file {}]
@@ -245,5 +257,5 @@ proc ::pd_guiprefs::plist_array_to_tcl_list {arr} {
 # the Mac OS X 'defaults' command uses single quotes to quote things,
 # so they need to be escaped
 proc ::pd_guiprefs::escape_for_plist {str} {
-    return [regsub -all -- {'} $str {\\'}]
+    return \"[regsub -all -- {"} $str {\\"}]\"
 }

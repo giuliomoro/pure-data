@@ -3,18 +3,15 @@
 * WARRANTIES, see the file, "LICENSE.txt," in this distribution.  */
 
 #include "m_pd.h"
-/* #include <string.h> */
-
-#ifdef HAVE_ALLOCA_H        /* ifdef nonsense to find include for alloca() */
-# include <alloca.h>        /* linux, mac, mingw, cygwin */
-#elif defined _MSC_VER
-# include <malloc.h>        /* MSVC */
-#else
-# include <stddef.h>        /* BSDs for example */
-#endif                      /* end alloca() ifdef nonsense */
 #include <string.h>
 
-extern t_pd *newest;
+#ifdef _WIN32
+# include <malloc.h> /* MSVC or mingw on windows */
+#elif defined(__linux__) || defined(__APPLE__)
+# include <alloca.h> /* linux, mac, mingw, cygwin */
+#else
+# include <stdlib.h> /* BSDs for example */
+#endif
 
 #ifndef HAVE_ALLOCA     /* can work without alloca() but we never need it */
 #define HAVE_ALLOCA 1
@@ -26,7 +23,7 @@ extern t_pd *newest;
 
     list append - append a list to another
     list prepend - prepend a list to another
-    list split - first n elements to first outlet, rest to second outlet 
+    list split - first n elements to first outlet, rest to second outlet
     list trim - trim off "list" selector
     list length - output number of items in list
     list fromsymbol - "explode" a symbol into a list of character codes
@@ -144,7 +141,7 @@ static void alist_anything(t_alist *x, t_symbol *s, int argc, t_atom *argv)
         x->l_vec[i+1].l_a = argv[i];
         if (x->l_vec[i+1].l_a.a_type == A_POINTER)
         {
-            x->l_npointer++;            
+            x->l_npointer++;
             gpointer_copy(x->l_vec[i+1].l_a.a_w.w_gpointer, &x->l_vec[i+1].l_p);
             x->l_vec[i+1].l_a.a_w.w_gpointer = &x->l_vec[i+1].l_p;
         }
@@ -576,31 +573,32 @@ static void list_tosymbol_setup(void)
 static void *list_new(t_pd *dummy, t_symbol *s, int argc, t_atom *argv)
 {
     if (!argc || argv[0].a_type != A_SYMBOL)
-        newest = list_append_new(s, argc, argv);
+        pd_this->pd_newest = list_append_new(s, argc, argv);
     else
     {
         t_symbol *s2 = argv[0].a_w.w_symbol;
         if (s2 == gensym("append"))
-            newest = list_append_new(s, argc-1, argv+1);
+            pd_this->pd_newest = list_append_new(s, argc-1, argv+1);
         else if (s2 == gensym("prepend"))
-            newest = list_prepend_new(s, argc-1, argv+1);
+            pd_this->pd_newest = list_prepend_new(s, argc-1, argv+1);
         else if (s2 == gensym("split"))
-            newest = list_split_new(atom_getfloatarg(1, argc, argv));
+            pd_this->pd_newest =
+                list_split_new(atom_getfloatarg(1, argc, argv));
         else if (s2 == gensym("trim"))
-            newest = list_trim_new();
+            pd_this->pd_newest = list_trim_new();
         else if (s2 == gensym("length"))
-            newest = list_length_new();
+            pd_this->pd_newest = list_length_new();
         else if (s2 == gensym("fromsymbol"))
-            newest = list_fromsymbol_new();
+            pd_this->pd_newest = list_fromsymbol_new();
         else if (s2 == gensym("tosymbol"))
-            newest = list_tosymbol_new();
-        else 
+            pd_this->pd_newest = list_tosymbol_new();
+        else
         {
             error("list %s: unknown function", s2->s_name);
-            newest = 0;
+            pd_this->pd_newest = 0;
         }
     }
-    return (newest);
+    return (pd_this->pd_newest);
 }
 
 void x_list_setup(void)

@@ -1,3 +1,32 @@
+# You can use this makefile to compile Pd for Gnu/linux.  Masochists and 
+# packagers might prefer the automake route as described in ../README.txt
+# You can invoke this one as:  $ make -f makefile.gnu
+# You don't have to "make install" - you can just invoke Pd from ../bin.
+#
+# targets include:
+# all: pd, pd-watchdog, pdsend, pdreceive, and all extras.
+# bin: just pd, pd-watchdog, pdsend, pdreceive.
+# local-clean: clean up for "bin" target"
+# clean: clean everything
+# depend: c header dependencies
+# tags: tags file
+# install: install to /usr/local (or elsewhere by setting "prefix" variable)
+#
+# You can get jack support ($ make -f makfile.gnu JACK=TRUE) or compile in
+# the portaudio library (PA=TRUE).  By default, both ALSA and OSS (BSD style)
+# audio APIs are compiled in.  You can disable them (e.g., OSS=FALSE).  In
+# Gnu/linux, you can also just install "alsa-oss."
+#
+# You can add compiler flags using CODECFLAGS, MORECFLAGS and/or MORELDFLAGS.
+# For example, you can turn off optimizing and enable debugging: CODECFLAGS=-g
+# or compile with native double precision: MORECFLAGS=-DPD_FLOATSIZE=64
+# The MORECFLAGS variable is propagated to "extras" but CODECFLAGS and
+# MORELDFLAGS are not.
+#
+# Packages you might need:
+# tk-devel alsa-devel alsa-oss (unless you disable OSS).
+# jack-audio-connection-kit-devel (if you want jack support)
+
 VPATH = ../obj:./
 OBJ_DIR = ../obj
 BIN_DIR = ../bin
@@ -20,17 +49,31 @@ pddocdir = $(libpddir)/doc
 libpdbindir = $(libpddir)/bin
 libpdtcldir = $(libpddir)/tcl
 
+# The C flags are separated into CPPFLAGS, CODECFLAGS, and MORECFLAGS
+# to allow easy overriding of CODECFLAGS and to allow adding MORECFLAGS:
+
+# C preprocessor flags, and flags controlling errors and warnings
 CPPFLAGS = -DPD -DHAVE_LIBDL -DHAVE_UNISTD_H -DHAVE_ALLOCA_H \
     -DPDGUIDIR=\"tcl/\" \
     -D_LARGEFILE64_SOURCE -DINSTALL_PREFIX=\"$(prefix)\" \
     -Wall -W -Wstrict-prototypes \
     -Wno-unused -Wno-unused-parameter -Wno-parentheses -Wno-switch
 
-MORECFLAGS = -O3 -ffast-math -funroll-loops -fomit-frame-pointer 
+# code generation flags (e.g., optimization).  
+CODECFLAGS = -g -O3 -ffast-math -funroll-loops -fomit-frame-pointer
 
+# anything else you want to specify.  Also passed on to "extra" makefiles.
+MORECFLAGS =
+
+# "standard" flags for linker
 LDFLAGS = -Wl,-export-dynamic
-LIB =   -ldl -lm -lpthread
 
+# and another variable you can override to add more (like "-g").
+MORELDFLAGS =
+
+# libraries and system-dependent sources.
+# These  get added onto if JACK, etc., are defined below
+LIB = -ldl -lm -lpthread
 SYSSRC = s_midi_oss.c
 
 # conditionally add code and flags for various audio APIs
@@ -54,10 +97,10 @@ SYSSRC += s_audio_pa.c
 LIB += -lportaudio
 endif
 
-CFLAGS = $(CPPFLAGS) $(MORECFLAGS)
+CFLAGS = $(CPPFLAGS) $(CODECFLAGS) $(MORECFLAGS)
 
 SRC = g_canvas.c g_graph.c g_text.c g_rtext.c g_array.c g_template.c g_io.c \
-    g_scalar.c g_traversal.c g_guiconnect.c g_readwrite.c g_editor.c \
+    g_scalar.c g_traversal.c g_guiconnect.c g_readwrite.c g_editor.c g_clone.c \
     g_all_guis.c g_bang.c g_hdial.c g_hslider.c g_mycanvas.c g_numbox.c \
     g_toggle.c g_vdial.c g_vslider.c g_vumeter.c \
     m_pd.c m_class.c m_obj.c m_atom.c m_memory.c m_binbuf.c \
@@ -69,7 +112,7 @@ SRC = g_canvas.c g_graph.c g_text.c g_rtext.c g_array.c g_template.c g_io.c \
     d_delay.c d_resample.c d_soundfile.c \
     x_arithmetic.c x_connective.c x_interface.c x_midi.c x_misc.c \
     x_time.c x_acoustics.c x_net.c x_text.c x_gui.c x_list.c x_array.c \
-    x_scalar.c \
+    x_scalar.c  x_vexp.c x_vexp_if.c x_vexp_fun.c \
     $(SYSSRC)
 
 OBJ = $(SRC:.c=.o) 
@@ -100,7 +143,7 @@ all: pd $(BIN_DIR)/pd-watchdog $(BIN_DIR)/pdsend $(BIN_DIR)/pdreceive externs \
 bin: pd $(BIN_DIR)/pd-watchdog $(BIN_DIR)/pdsend $(BIN_DIR)/pdreceive
 
 $(OBJ) : %.o : %.c
-	$(CC) $(CFLAGS) $(GFLAGS) $(INCLUDE) -c -o $(OBJ_DIR)/$*.o $*.c 
+	$(CC) $(CFLAGS) $(INCLUDE) -c -o $(OBJ_DIR)/$*.o $*.c 
 
 pd: $(PDEXEC)
 
@@ -108,32 +151,31 @@ pd-watchdog: $(BIN_DIR)/pd-watchdog
 
 $(BIN_DIR)/pd-watchdog: s_watchdog.c
 	test -d $(BIN_DIR) || mkdir -p $(BIN_DIR)
-	$(CC) $(CFLAGS) $(STRIPFLAG) -o $(BIN_DIR)/pd-watchdog s_watchdog.c
+	$(CC) $(CFLAGS) -o $(BIN_DIR)/pd-watchdog s_watchdog.c
 
 $(BIN_DIR)/pdsend: u_pdsend.c
 	test -d $(BIN_DIR) || mkdir -p $(BIN_DIR)
-	$(CC) $(CFLAGS)  $(STRIPFLAG) -o $(BIN_DIR)/pdsend u_pdsend.c
+	$(CC) $(CFLAGS) -o $(BIN_DIR)/pdsend u_pdsend.c
 
 $(BIN_DIR)/pdreceive: u_pdreceive.c
 	test -d $(BIN_DIR) || mkdir -p $(BIN_DIR)
-	$(CC) $(CFLAGS)  $(STRIPFLAG) -o $(BIN_DIR)/pdreceive u_pdreceive.c
+	$(CC) $(CFLAGS) -o $(BIN_DIR)/pdreceive u_pdreceive.c
 
 $(PDEXEC): $(OBJ_DIR) $(OBJ)
 	test -d $(BIN_DIR) || mkdir -p $(BIN_DIR)
-	cd ../obj;  $(CC) $(LDFLAGS) $(DBG_CFLAGS) -o $(PDEXEC) $(OBJ) $(LIB)
+	cd ../obj;  $(CC) $(LDFLAGS) $(MORELDFLAGS) -o $(PDEXEC) $(OBJ) $(LIB)
 
 externs: 
-	make -C ../extra/bonk~    
-	make -C ../extra/choice   
-	make -C ../extra/expr~    
-	make -C ../extra/fiddle~  
-	make -C ../extra/loop~    
-	make -C ../extra/lrshift~ 
-	make -C ../extra/pique    
-	make -C ../extra/sigmund~ 
-	make -C ../extra/pd~      
-	make -C ../extra/stdout   
-	make -C ../extra/bob~  
+	make -C ../extra/bonk~     MORECFLAGS="$(MORECFLAGS)" 
+	make -C ../extra/choice    MORECFLAGS="$(MORECFLAGS)" 
+	make -C ../extra/fiddle~   MORECFLAGS="$(MORECFLAGS)" 
+	make -C ../extra/loop~     MORECFLAGS="$(MORECFLAGS)" 
+	make -C ../extra/lrshift~  MORECFLAGS="$(MORECFLAGS)" 
+	make -C ../extra/pique     MORECFLAGS="$(MORECFLAGS)" 
+	make -C ../extra/sigmund~  MORECFLAGS="$(MORECFLAGS)" 
+	make -C ../extra/pd~       MORECFLAGS="$(MORECFLAGS)" 
+	make -C ../extra/stdout    MORECFLAGS="$(MORECFLAGS)" 
+	make -C ../extra/bob~      MORECFLAGS="$(MORECFLAGS)" 
 
 BINARYMODE=-m755
 
@@ -217,10 +259,3 @@ uninstall:
 	rm -f $(DESTDIR)$(mandir)/man1/pdreceive.1.gz
 
 -include makefile.dependencies
-
-
-
-
-
-
-

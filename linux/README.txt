@@ -1,5 +1,6 @@
 release checklist
-    update Makefile.am doc list: cd pd; find doc -type f | sort
+    update doc/Makefile.am list: cd pd/doc;
+        find . -type f | sort | awk '{print "    ", $1, "\\"}'; echo '     $(empty)'
     version string in ../src/m_pd.h ../configure.ac ../src/pd.rc
     release notes ../doc/1.manual/x5.htm
     copyright date in ../README.txt
@@ -13,6 +14,7 @@ release checklist
     copy from ~/pd/dist to ~/bis/lib/public_html/Software/
     rsync -avzl --delete ~/pd/doc/1.manual/ \
         ~/bis/lib/public_html/Pd_documentation/
+    chmod -R g-w ~/bis/lib/public_html/Pd_documentation/
     cp -a ~/pd/README.txt ~/bis/lib/public_html/Software/pd-README.txt
     (cd /home/msp/bis/lib/public_html/Software; htmldir.perl .)
     nedit-client /home/msp/bis/lib/public_html/software.htm

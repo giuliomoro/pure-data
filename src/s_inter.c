@@ -9,6 +9,7 @@ that didn't really belong anywhere. */
 #include "s_stuff.h"
 #include "m_imp.h"
 #include "g_canvas.h"   /* for GUI queueing stuff */
+#include "ringbuffer.h"
 #ifndef _WIN32
 #include <unistd.h>
 #include <sys/socket.h>
@@ -45,7 +46,6 @@ typedef int socklen_t;
 #ifdef __APPLE__
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <pthread.h>
 #include <glob.h>
 #else
 #include <stdlib.h>
@@ -72,11 +72,17 @@ typedef int socklen_t;
 #define LOCALHOST "localhost"
 #endif
 
+#if PDTHREADS
+#include "pthread.h"
+#endif
+#define RB_SIZE 16384
+
 typedef struct _fdpoll
 {
     int fdp_fd;
     t_fdpollfn fdp_fn;
     void *fdp_ptr;
+    ring_buffer* rb;
 } t_fdpoll;
 
 #define INBUFSIZE 4096
@@ -92,25 +98,50 @@ struct _socketreceiver
     t_socketreceivefn sr_socketreceivefn;
 };
 
+typedef struct _guiqueue
+{
+    void *gq_client;
+    t_glist *gq_glist;
+    t_guicallbackfn gq_fn;
+    struct _guiqueue *gq_next;
+} t_guiqueue;
+
+struct _instanceinter
+{
+    int i_nfdpoll;
+    t_fdpoll *i_fdpoll;
+    int i_maxfd;
+    int i_guisock;
+    t_socketreceiver *i_socketreceiver;
+    t_guiqueue *i_guiqueuehead;
+    t_binbuf *i_inbinbuf;
+    char *i_guibuf;
+	ring_buffer* i_guibuf_rb;
+    int i_guihead;
+    int i_guitail;
+    int i_guisize;
+    int i_waitingforping;
+    int i_bytessincelastping;
+
+#ifdef _WIN32
+    LARGE_INTEGER i_inittime;
+    double i_freq;
+#endif
+#if PDTHREADS
+    pthread_mutex_t i_mutex;
+#endif
+};
+
 extern int sys_guisetportnumber;
-
-static int sys_nfdpoll;
-static t_fdpoll *sys_fdpoll;
-static int sys_maxfd;
-static int sys_guisock;
-
-static t_binbuf *inbinbuf;
-static t_socketreceiver *sys_socketreceiver;
 extern int sys_addhist(int phase);
 void sys_set_searchpath(void);
 void sys_set_extrapath(void);
 void sys_set_startup(void);
+void sys_stopgui( void);
 
 /* ----------- functions for timing, signals, priorities, etc  --------- */
 
 #ifdef _WIN32
-static LARGE_INTEGER nt_inittime;
-static double nt_freq = 0;
 
 static void sys_initntclock(void)
 {
@@ -122,8 +153,8 @@ static void sys_initntclock(void)
           fprintf(stderr, "pd: QueryPerformanceFrequency failed\n");
           f1.QuadPart = 1;
     }
-    nt_freq = f1.QuadPart;
-    nt_inittime = now;
+    pd_this->pd_inter->i_freq = f1.QuadPart;
+    pd_this->pd_inter->i_inittime = now;
 }
 
 #if 0
@@ -133,15 +164,16 @@ static void sys_initntclock(void)
 
 double nt_tixtotime(LARGE_INTEGER *dumbass)
 {
-    if (nt_freq == 0) sys_initntclock();
-    return (((double)(dumbass->QuadPart - nt_inittime.QuadPart)) / nt_freq);
+    if (pd_this->pd_inter->i_freq == 0) sys_initntclock();
+    return (((double)(dumbass->QuadPart -
+        pd_this->pd_inter->i_inittime.QuadPart)) / pd_this->pd_inter->i_freq);
 }
 #endif
 #endif /* _WIN32 */
 
     /* get "real time" in seconds; take the
     first time we get called as a reference time of zero. */
-double sys_getrealtime(void)    
+double sys_getrealtime(void)
 {
 #ifndef _WIN32
     static struct timeval then;
@@ -153,52 +185,108 @@ double sys_getrealtime(void)
 #else
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
-    if (nt_freq == 0) sys_initntclock();
-    return (((double)(now.QuadPart - nt_inittime.QuadPart)) / nt_freq);
+    if (pd_this->pd_inter->i_freq == 0) sys_initntclock();
+    return (((double)(now.QuadPart -
+        pd_this->pd_inter->i_inittime.QuadPart)) / pd_this->pd_inter->i_freq);
 #endif
 }
 
 extern int sys_nosleep;
 
-static int sys_domicrosleep(int microsec, int pollem)
+static void poll_fds()
 {
+    const unsigned int maxRecv = RB_SIZE; // an arbitrary limit per call to recv, which will be further narrowed down below on a per-socket basis
+    char* buf;
+    buf = (char*)malloc(maxRecv);
+    int i, ret;
     struct timeval timout;
-    int i, didsomething = 0;
     t_fdpoll *fp;
     timout.tv_sec = 0;
-    timout.tv_usec = (sys_nosleep ? 0 : microsec);
-    if (pollem)
+    timout.tv_usec = 0;
+    if (1)
     {
         fd_set readset, writeset, exceptset;
         FD_ZERO(&writeset);
         FD_ZERO(&readset);
         FD_ZERO(&exceptset);
-        for (fp = sys_fdpoll, i = sys_nfdpoll; i--; fp++)
-            FD_SET(fp->fdp_fd, &readset);
+        for (fp = pd_this->pd_inter->i_fdpoll,
+            i = pd_this->pd_inter->i_nfdpoll; i--; fp++)
+		{
+			if(fp->fdp_fd == -1){
+				printf("fdp == -1: %p %l\n", fp, fp - pd_this->pd_inter->i_fdpoll);
+				continue;
+			}
+			FD_SET(fp->fdp_fd, &readset);
+		}
 #ifdef _WIN32
-        if (sys_maxfd == 0)
+        if (pd_this->pd_inter->i_maxfd == 0)
                 Sleep(microsec/1000);
         else
 #endif
-        select(sys_maxfd+1, &readset, &writeset, &exceptset, &timout);
-        for (i = 0; i < sys_nfdpoll; i++)
-            if (FD_ISSET(sys_fdpoll[i].fdp_fd, &readset))
+        select(pd_this->pd_inter->i_maxfd+1,
+            &readset, &writeset, &exceptset, &timout);
+        for (i = 0; i < pd_this->pd_inter->i_nfdpoll; i++)
+            if (FD_ISSET(pd_this->pd_inter->i_fdpoll[i].fdp_fd, &readset))
+		{
+			// let's store it locally to avoid changing too much of the code below
+			t_fdpoll* sys_fdpoll = pd_this->pd_inter->i_fdpoll;
+            int fd = sys_fdpoll[i].fdp_fd;
+            ring_buffer* rb = sys_fdpoll[i].rb;
+            unsigned int size = rb_available_to_write(rb);
+            size = size > maxRecv ? maxRecv : size;
+            //if callback == socketreceiver_read, do this:
+            if ((void*)*sys_fdpoll[i].fdp_fn == (void*)socketreceiver_read)
+                ret = recv(fd, buf, size, 0);
+            else
+            //otherwise call the actual callback NOW
+                (*sys_fdpoll[i].fdp_fn)(sys_fdpoll[i].fdp_ptr, sys_fdpoll[i].rb, sys_fdpoll[i].fdp_fd);
+
+            if(ret < 0)
+            {
+                fprintf(stderr, "Error during recv: %s(%d)\n", strerror(-ret), -ret);
+            }
+            else
+            {
+                // store the received data in the ringbuffer
+                ret = rb_write_to_buffer(rb, 1, buf, ret);
+            }
+        }
+    }
+    free(buf);
+}
+
+int sys_domicrosleep(int microsec, int pollem)
+{
+    int i, didsomething = 0;
+    if (pollem)
+    {
+        for (i = 0; i < pd_this->pd_inter->i_nfdpoll; i++)
         {
+            if(rb_available_to_read(pd_this->pd_inter->i_fdpoll[i].rb) > 0)
+            {
 #ifdef THREAD_LOCKING
-            sys_lock();
+                sys_lock();
 #endif
-            (*sys_fdpoll[i].fdp_fn)(sys_fdpoll[i].fdp_ptr, sys_fdpoll[i].fdp_fd);
+            (*pd_this->pd_inter->i_fdpoll[i].fdp_fn)
+                (pd_this->pd_inter->i_fdpoll[i].fdp_ptr,
+                    pd_this->pd_inter->i_fdpoll[i].rb,
+                    pd_this->pd_inter->i_fdpoll[i].fdp_fd);
 #ifdef THREAD_LOCKING
-            sys_unlock();
+                sys_unlock();
 #endif
-            didsomething = 1;
+				didsomething = 1;
+            }
         }
         return (didsomething);
     }
     else
     {
+        struct timeval timout;
+        t_fdpoll *fp;
+        timout.tv_sec = 0;
+        timout.tv_usec = (sys_nosleep ? 0 : microsec);
 #ifdef _WIN32
-        if (sys_maxfd == 0)
+        if (pd_this->pd_inter->i_maxfd == 0)
               Sleep(microsec/1000);
         else
 #endif
@@ -271,20 +359,43 @@ void sys_setalarm(int microsec)
 
 #endif /* NOT _WIN32 && NOT __CYGWIN__ */
 
+    /* on startup, set various signal handlers */
+void sys_setsignalhandlers( void)
+{
+#if !defined(_WIN32) && !defined(__CYGWIN__)
+    signal(SIGHUP, sys_huphandler);
+    signal(SIGINT, sys_exithandler);
+    signal(SIGQUIT, sys_exithandler);
+    signal(SIGILL, sys_exithandler);
+# ifdef SIGIOT
+    signal(SIGIOT, sys_exithandler);
+# endif
+    signal(SIGFPE, SIG_IGN);
+    /* signal(SIGILL, sys_exithandler);
+    signal(SIGBUS, sys_exithandler);
+    signal(SIGSEGV, sys_exithandler); */
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGALRM, SIG_IGN);
+#if 0  /* GG says: don't use that */
+    signal(SIGSTKFLT, sys_exithandler);
+#endif
+#endif /* NOT _WIN32 && NOT __CYGWIN__ */
+}
+
 #if defined(__linux__) || defined(__FreeBSD_kernel__) || defined(__GNU__)
 
 #if defined(_POSIX_PRIORITY_SCHEDULING) || defined(_POSIX_MEMLOCK)
 #include <sched.h>
 #endif
 
-void sys_set_priority(int higher) 
+void sys_set_priority(int higher)
 {
 #ifdef _POSIX_PRIORITY_SCHEDULING
     struct sched_param par;
     int p1 ,p2, p3;
     p1 = sched_get_priority_min(SCHED_FIFO);
     p2 = sched_get_priority_max(SCHED_FIFO);
-#ifdef USEAPI_JACK    
+#ifdef USEAPI_JACK
     p3 = (higher ? p1 + 7 : p1 + 5);
 #else
     p3 = (higher ? p2 - 5 : p2 - 7);
@@ -311,7 +422,7 @@ void sys_set_priority(int higher)
         setrlimit(RLIMIT_MEMLOCK,&mlock_limit);
     }
     /* } tb */
-    if (mlockall(MCL_FUTURE) != -1) 
+    if (mlockall(MCL_FUTURE) != -1)
         fprintf(stderr, "memory locking enabled.\n");
 #endif
 #endif
@@ -340,25 +451,30 @@ void sys_sockerror(char *s)
 
 void sys_addpollfn(int fd, t_fdpollfn fn, void *ptr)
 {
-    int nfd = sys_nfdpoll;
-    int size = nfd * sizeof(t_fdpoll);
+    int nfd, size;
     t_fdpoll *fp;
-    sys_fdpoll = (t_fdpoll *)t_resizebytes(sys_fdpoll, size,
-        size + sizeof(t_fdpoll));
-    fp = sys_fdpoll + nfd;
+    sys_init_fdpoll();
+    nfd = pd_this->pd_inter->i_nfdpoll;
+    size = nfd * sizeof(t_fdpoll);
+    pd_this->pd_inter->i_fdpoll = (t_fdpoll *)t_resizebytes(
+        pd_this->pd_inter->i_fdpoll, size, size + sizeof(t_fdpoll));
+    fp = pd_this->pd_inter->i_fdpoll + nfd;
     fp->fdp_fd = fd;
     fp->fdp_fn = fn;
     fp->fdp_ptr = ptr;
-    sys_nfdpoll = nfd + 1;
-    if (fd >= sys_maxfd) sys_maxfd = fd + 1;
+	fp->rb = rb_create(RB_SIZE);
+	printf("Created rb for fd %d: %p\n", fp->fdp_fd, fp->rb);
+    pd_this->pd_inter->i_nfdpoll = nfd + 1;
+    if (fd >= pd_this->pd_inter->i_maxfd)
+        pd_this->pd_inter->i_maxfd = fd + 1;
 }
 
 void sys_rmpollfn(int fd)
 {
-    int nfd = sys_nfdpoll;
+    int nfd = pd_this->pd_inter->i_nfdpoll;
     int i, size = nfd * sizeof(t_fdpoll);
     t_fdpoll *fp;
-    for (i = nfd, fp = sys_fdpoll; i--; fp++)
+    for (i = nfd, fp = pd_this->pd_inter->i_fdpoll; i--; fp++)
     {
         if (fp->fdp_fd == fd)
         {
@@ -367,9 +483,9 @@ void sys_rmpollfn(int fd)
                 fp[0] = fp[1];
                 fp++;
             }
-            sys_fdpoll = (t_fdpoll *)t_resizebytes(sys_fdpoll, size,
-                size - sizeof(t_fdpoll));
-            sys_nfdpoll = nfd - 1;
+            pd_this->pd_inter->i_fdpoll = (t_fdpoll *)t_resizebytes(
+                pd_this->pd_inter->i_fdpoll, size, size - sizeof(t_fdpoll));
+            pd_this->pd_inter->i_nfdpoll = nfd - 1;
             return;
         }
     }
@@ -414,7 +530,7 @@ static int socketreceiver_doread(t_socketreceiver *x)
         if (c == ';' && (!indx || inbuf[indx-1] != '\\'))
         {
             intail = (indx+1)&(INBUFSIZE-1);
-            binbuf_text(inbinbuf, messbuf, bp - messbuf);
+            binbuf_text(pd_this->pd_inter->i_inbinbuf, messbuf, bp - messbuf);
             if (sys_debuglevel & DEBUG_MESSDOWN)
             {
                 write(2,  messbuf, bp - messbuf);
@@ -428,10 +544,27 @@ static int socketreceiver_doread(t_socketreceiver *x)
     return (0);
 }
 
-static void socketreceiver_getudp(t_socketreceiver *x, int fd)
+int rb_recv(ring_buffer* rb, char* buf, size_t length, void* nothing)
+{
+    int ret;
+    int maxLength = rb_available_to_read(rb);
+    // only request as many bytes as we can store if they are available
+    int actualLength = length < maxLength ? length : maxLength;
+    ret = rb_read_from_buffer(rb, buf, actualLength);
+    if(ret)
+    {
+        printf("Error while reading from buffer: %d\n", ret);
+        return -1;
+    }
+    return actualLength;
+}
+
+static void socketreceiver_getudp(t_socketreceiver *x, ring_buffer* rb, int fd)
 {
     char buf[INBUFSIZE+1];
-    int ret = recv(fd, buf, INBUFSIZE, 0);
+    //int ret = recv(fd, buf, INBUFSIZE, 0);
+    int ret = rb_recv(rb, buf, INBUFSIZE, 0);
+        
     if (ret < 0)
     {
         sys_sockerror("recv");
@@ -454,12 +587,13 @@ static void socketreceiver_getudp(t_socketreceiver *x, int fd)
         else
         {
             char *semi = strchr(buf, ';');
-            if (semi) 
+            if (semi)
                 *semi = 0;
-            binbuf_text(inbinbuf, buf, strlen(buf));
+            binbuf_text(pd_this->pd_inter->i_inbinbuf, buf, strlen(buf));
             outlet_setstacklim();
             if (x->sr_socketreceivefn)
-                (*x->sr_socketreceivefn)(x->sr_owner, inbinbuf);
+                (*x->sr_socketreceivefn)(x->sr_owner,
+                    pd_this->pd_inter->i_inbinbuf);
             else bug("socketreceiver_getudp");
         }
     }
@@ -467,10 +601,10 @@ static void socketreceiver_getudp(t_socketreceiver *x, int fd)
 
 void sys_exit(void);
 
-void socketreceiver_read(t_socketreceiver *x, int fd)
+void socketreceiver_read(t_socketreceiver *x, ring_buffer* rb, int fd)
 {
     if (x->sr_udp)   /* UDP ("datagram") socket protocol */
-        socketreceiver_getudp(x, fd);
+        socketreceiver_getudp(x, rb, fd);
     else  /* TCP ("streaming") socket protocol */
     {
         char *semi;
@@ -487,32 +621,28 @@ void socketreceiver_read(t_socketreceiver *x, int fd)
         }
         else
         {
-            ret = recv(fd, x->sr_inbuf + x->sr_inhead,
+            //ret = recv(fd, x->sr_inbuf + x->sr_inhead,
+            ret = rb_recv(rb, x->sr_inbuf + x->sr_inhead,
                 readto - x->sr_inhead, 0);
-            if (ret < 0)
+            if (ret <= 0)
             {
-                sys_sockerror("recv");
-                if (x == sys_socketreceiver) sys_bail(1);
+                if (ret < 0)
+                    sys_sockerror("recv");
+                if (x == pd_this->pd_inter->i_socketreceiver)
+                {
+                    if (pd_this == &pd_maininstance)
+                        sys_bail(1);
+                    else
+                    {
+                        sys_rmpollfn(fd);
+                        sys_closesocket(fd);
+                        sys_stopgui();
+                    }
+                }
                 else
                 {
                     if (x->sr_notifier)
                         (*x->sr_notifier)(x->sr_owner, fd);
-                    sys_rmpollfn(fd);
-                    sys_closesocket(fd);
-                }
-            }
-            else if (ret == 0)
-            {
-                if (x == sys_socketreceiver)
-                {
-                    fprintf(stderr, "pd: exiting\n");
-                    sys_exit();
-                    return;
-                }
-                else
-                {
-                    post("EOF on socket %d\n", fd);
-                    if (x->sr_notifier) (*x->sr_notifier)(x->sr_owner, fd);
                     sys_rmpollfn(fd);
                     sys_closesocket(fd);
                 }
@@ -525,8 +655,9 @@ void socketreceiver_read(t_socketreceiver *x, int fd)
                 {
                     outlet_setstacklim();
                     if (x->sr_socketreceivefn)
-                        (*x->sr_socketreceivefn)(x->sr_owner, inbinbuf);
-                    else binbuf_eval(inbinbuf, 0, 0, 0);
+                        (*x->sr_socketreceivefn)(x->sr_owner,
+                            pd_this->pd_inter->i_inbinbuf);
+                    else binbuf_eval(pd_this->pd_inter->i_inbinbuf, 0, 0, 0);
                     if (x->sr_inhead == x->sr_intail)
                         break;
                 }
@@ -550,38 +681,41 @@ void sys_closesocket(int fd)
 #define GUI_UPDATESLICE 512 /* how much we try to do in one idle period */
 #define GUI_BYTESPERPING 1024 /* how much we send up per ping */
 
-typedef struct _guiqueue
-{
-    void *gq_client;
-    t_glist *gq_glist;
-    t_guicallbackfn gq_fn;
-    struct _guiqueue *gq_next;
-} t_guiqueue;
-
-static t_guiqueue *sys_guiqueuehead;
-static char *sys_guibuf;
-static int sys_guibufhead;
-static int sys_guibuftail;
-static int sys_guibufsize;
-static int sys_waitingforping;
-static int sys_bytessincelastping;
-
+/*
+*typedef struct _guiqueue
+*{
+*    void *gq_client;
+*    t_glist *gq_glist;
+*    t_guicallbackfn gq_fn;
+*    struct _guiqueue *gq_next;
+*} t_guiqueue;
+*
+*static t_guiqueue *sys_guiqueuehead;
+*static char *sys_guibuf;
+*static ring_buffer *sys_guibuf_rb;
+*static int sys_guibufhead;
+*static int sys_guibuftail;
+*static int sys_guibufsize;
+*static int sys_waitingforping;
+*static int sys_bytessincelastping;
+*/
 static void sys_trytogetmoreguibuf(int newsize)
 {
-    char *newbuf = realloc(sys_guibuf, newsize);
+    char *newbuf = realloc(pd_this->pd_inter->i_guibuf, newsize);
 #if 0
     static int sizewas;
     if (newsize > 70000 && sizewas < 70000)
     {
         int i;
-        for (i = sys_guibuftail; i < sys_guibufhead; i++)
-            fputc(sys_guibuf[i], stderr);
+        for (i = pd_this->pd_inter->i_guitail;
+            i < pd_this->pd_inter->i_guihead; i++)
+                fputc(pd_this->pd_inter->i_guibuf[i], stderr);
     }
     sizewas = newsize;
 #endif
 #if 0
     fprintf(stderr, "new size %d (head %d, tail %d)\n",
-        newsize, sys_guibufhead, sys_guibuftail);
+        newsize, pd_this->pd_inter->i_guihead, pd_this->pd_inter->i_guitail);
 #endif
 
         /* if realloc fails, make a last-ditch attempt to stay alive by
@@ -589,12 +723,14 @@ static void sys_trytogetmoreguibuf(int newsize)
         this by intentionally setting newbuf to zero */
     if (!newbuf)
     {
-        int bytestowrite = sys_guibuftail - sys_guibufhead;
+        int bytestowrite = pd_this->pd_inter->i_guitail -
+            pd_this->pd_inter->i_guihead;
         int written = 0;
         while (1)
         {
-            int res = send(sys_guisock,
-                sys_guibuf + sys_guibuftail + written, bytestowrite, 0);
+            int res = send(pd_this->pd_inter->i_guisock,
+                pd_this->pd_inter->i_guibuf + pd_this->pd_inter->i_guitail +
+                    written, bytestowrite, 0);
             if (res < 0)
             {
                 perror("pd output pipe");
@@ -607,12 +743,12 @@ static void sys_trytogetmoreguibuf(int newsize)
                     break;
             }
         }
-        sys_guibufhead = sys_guibuftail = 0;
+        pd_this->pd_inter->i_guihead = pd_this->pd_inter->i_guitail = 0;
     }
     else
     {
-        sys_guibufsize = newsize;
-        sys_guibuf = newbuf;
+        pd_this->pd_inter->i_guisize = newsize;
+        pd_this->pd_inter->i_guibuf = newbuf;
     }
 }
 
@@ -623,46 +759,59 @@ void sys_vgui(char *fmt, ...)
 
     if (sys_nogui)
         return;
-    if (!sys_guibuf)
+    if (!pd_this->pd_inter->i_guibuf)
     {
-        if (!(sys_guibuf = malloc(GUI_ALLOCCHUNK)))
+        if (!(pd_this->pd_inter->i_guibuf = malloc(GUI_ALLOCCHUNK)))
         {
             fprintf(stderr, "Pd: couldn't allocate GUI buffer\n");
             sys_bail(1);
         }
-        sys_guibufsize = GUI_ALLOCCHUNK;
-        sys_guibufhead = sys_guibuftail = 0;
+        pd_this->pd_inter->i_guisize = GUI_ALLOCCHUNK;
+        pd_this->pd_inter->i_guihead = pd_this->pd_inter->i_guitail = 0;
     }
-    if (sys_guibufhead > sys_guibufsize - (GUI_ALLOCCHUNK/2))
-        sys_trytogetmoreguibuf(sys_guibufsize + GUI_ALLOCCHUNK);
+	if (!pd_this->pd_inter->i_guibuf_rb)
+	{
+		pd_this->pd_inter->i_guibuf_rb = rb_create(GUI_ALLOCCHUNK * 8);
+	}
+    if (pd_this->pd_inter->i_guihead > pd_this->pd_inter->i_guisize -
+        (GUI_ALLOCCHUNK/2))
+            sys_trytogetmoreguibuf(pd_this->pd_inter->i_guisize +
+                GUI_ALLOCCHUNK);
     va_start(ap, fmt);
-    msglen = vsnprintf(sys_guibuf + sys_guibufhead,
-        sys_guibufsize - sys_guibufhead, fmt, ap);
+    msglen = vsnprintf(pd_this->pd_inter->i_guibuf +
+        pd_this->pd_inter->i_guihead,
+            pd_this->pd_inter->i_guisize - pd_this->pd_inter->i_guihead,
+                fmt, ap);
     va_end(ap);
-    if(msglen < 0) 
+    if(msglen < 0)
     {
-        fprintf(stderr, "Pd: buffer space wasn't sufficient for long GUI string\n");
+        fprintf(stderr,
+            "Pd: buffer space wasn't sufficient for long GUI string\n");
         return;
     }
-    if (msglen >= sys_guibufsize - sys_guibufhead)
+    if (msglen >= pd_this->pd_inter->i_guisize - pd_this->pd_inter->i_guihead)
     {
-        int msglen2, newsize = sys_guibufsize + 1 +
+        int msglen2, newsize = pd_this->pd_inter->i_guisize + 1 +
             (msglen > GUI_ALLOCCHUNK ? msglen : GUI_ALLOCCHUNK);
         sys_trytogetmoreguibuf(newsize);
 
         va_start(ap, fmt);
-        msglen2 = vsnprintf(sys_guibuf + sys_guibufhead,
-            sys_guibufsize - sys_guibufhead, fmt, ap);
+        msglen2 = vsnprintf(pd_this->pd_inter->i_guibuf +
+            pd_this->pd_inter->i_guihead,
+                pd_this->pd_inter->i_guisize - pd_this->pd_inter->i_guihead,
+                    fmt, ap);
         va_end(ap);
         if (msglen2 != msglen)
             bug("sys_vgui");
-        if (msglen >= sys_guibufsize - sys_guibufhead)
-            msglen = sys_guibufsize - sys_guibufhead;
+        if (msglen >= pd_this->pd_inter->i_guisize -
+            pd_this->pd_inter->i_guihead) msglen =
+                pd_this->pd_inter->i_guisize - pd_this->pd_inter->i_guihead;
     }
     if (sys_debuglevel & DEBUG_MESSUP)
-        fprintf(stderr, "%s",  sys_guibuf + sys_guibufhead);
-    sys_guibufhead += msglen;
-    sys_bytessincelastping += msglen;
+        fprintf(stderr, "%s",
+            pd_this->pd_inter->i_guibuf + pd_this->pd_inter->i_guihead);
+    pd_this->pd_inter->i_guihead += msglen;
+    pd_this->pd_inter->i_bytessincelastping += msglen;
 }
 
 void sys_gui(char *s)
@@ -670,13 +819,68 @@ void sys_gui(char *s)
     sys_vgui("%s", s);
 }
 
+
+ssize_t rb_send(ring_buffer* rb, int socket, const void *buffer, size_t length, int flags)
+{
+	printf("rb_send: fd: %d, rb: %p\n", socket, rb);
+    size_t maxLength = rb_available_to_write(rb);
+    size_t desiredLength = sizeof(size_t) + length;
+    size_t actualLength = desiredLength <= maxLength ? desiredLength : maxLength;
+    if(actualLength < desiredLength)
+    {
+        // now we are in trouble:
+		// TODO: what should we do? Realloc the ringbuffer I guess
+        perror("rb buffer is full, discarding message");
+        return -1;
+    }
+    // TODO: what happens if a socket is removed while it is in the queue?
+    rb_write_to_buffer(rb, 3, (char*)&socket, sizeof(socket), (char*)&length, sizeof(length), buffer, length);
+    return actualLength;
+}
+
+void rb_dosend(ring_buffer* rb)
+{
+    int socket;
+    size_t length;
+    char* buf;
+    if(rb_read_from_buffer(rb, (char*)&socket, sizeof(socket)) < 0)
+	{
+		// no message to retrieve
+        return;
+	}
+    if(rb_read_from_buffer(rb, (char*)&length, sizeof(length)) < 0)
+    {
+        // TODO: we should never be here 
+        perror("we should not be here 1");
+        return;
+    }
+    buf = (char*)malloc(length);
+    if(rb_read_from_buffer(rb, buf, length) < 0)
+    {
+        // TODO: we should never be here 
+        perror("we should not be here 2");
+        return;
+    }
+    int nwrote = send(socket, buf, length, 0);
+
+    if (nwrote < 0)
+    {
+        // TODO: these are probably not thread-safe
+        perror("pd-to-gui socket");
+        sys_bail(1);
+    }
+
+}
+
 static int sys_flushtogui( void)
 {
-    int writesize = sys_guibufhead - sys_guibuftail, nwrote = 0;
+    int writesize = pd_this->pd_inter->i_guihead - pd_this->pd_inter->i_guitail,
+        nwrote = 0;
     if (writesize > 0)
-        nwrote = send(sys_guisock, sys_guibuf + sys_guibuftail, writesize, 0);
-
-#if 0   
+        nwrote = rb_send(pd_this->pd_inter->i_guibuf_rb, pd_this->pd_inter->i_guisock,
+            pd_this->pd_inter->i_guibuf + pd_this->pd_inter->i_guitail,
+                writesize, 0);
+#if 0
     if (writesize)
         fprintf(stderr, "wrote %d of %d\n", nwrote, writesize);
 #endif
@@ -688,17 +892,21 @@ static int sys_flushtogui( void)
     }
     else if (!nwrote)
         return (0);
-    else if (nwrote >= sys_guibufhead - sys_guibuftail)
-         sys_guibufhead = sys_guibuftail = 0;
+    else if (nwrote >= pd_this->pd_inter->i_guihead -
+        pd_this->pd_inter->i_guitail)
+            pd_this->pd_inter->i_guihead = pd_this->pd_inter->i_guitail = 0;
     else if (nwrote)
     {
-        sys_guibuftail += nwrote;
-        if (sys_guibuftail > (sys_guibufsize >> 2))
+        pd_this->pd_inter->i_guitail += nwrote;
+        if (pd_this->pd_inter->i_guitail > (pd_this->pd_inter->i_guisize >> 2))
         {
-            memmove(sys_guibuf, sys_guibuf + sys_guibuftail,
-                sys_guibufhead - sys_guibuftail);
-            sys_guibufhead = sys_guibufhead - sys_guibuftail;
-            sys_guibuftail = 0;
+            memmove(pd_this->pd_inter->i_guibuf,
+                pd_this->pd_inter->i_guibuf + pd_this->pd_inter->i_guitail,
+                    pd_this->pd_inter->i_guihead -
+                        pd_this->pd_inter->i_guitail);
+            pd_this->pd_inter->i_guihead = pd_this->pd_inter->i_guihead -
+                pd_this->pd_inter->i_guitail;
+            pd_this->pd_inter->i_guitail = 0;
         }
     }
     return (1);
@@ -706,34 +914,34 @@ static int sys_flushtogui( void)
 
 void glob_ping(t_pd *dummy)
 {
-    sys_waitingforping = 0;
+    pd_this->pd_inter->i_waitingforping = 0;
 }
 
 static int sys_flushqueue(void )
 {
-    int wherestop = sys_bytessincelastping + GUI_UPDATESLICE;
+    int wherestop = pd_this->pd_inter->i_bytessincelastping + GUI_UPDATESLICE;
     if (wherestop + (GUI_UPDATESLICE >> 1) > GUI_BYTESPERPING)
         wherestop = 0x7fffffff;
-    if (sys_waitingforping)
+    if (pd_this->pd_inter->i_waitingforping)
         return (0);
-    if (!sys_guiqueuehead)
+    if (!pd_this->pd_inter->i_guiqueuehead)
         return (0);
     while (1)
     {
-        if (sys_bytessincelastping >= GUI_BYTESPERPING)
+        if (pd_this->pd_inter->i_bytessincelastping >= GUI_BYTESPERPING)
         {
             sys_gui("pdtk_ping\n");
-            sys_bytessincelastping = 0;
-            sys_waitingforping = 1;
+            pd_this->pd_inter->i_bytessincelastping = 0;
+            pd_this->pd_inter->i_waitingforping = 1;
             return (1);
         }
-        if (sys_guiqueuehead)
+        if (pd_this->pd_inter->i_guiqueuehead)
         {
-            t_guiqueue *headwas = sys_guiqueuehead;
-            sys_guiqueuehead = headwas->gq_next;
+            t_guiqueue *headwas = pd_this->pd_inter->i_guiqueuehead;
+            pd_this->pd_inter->i_guiqueuehead = headwas->gq_next;
             (*headwas->gq_fn)(headwas->gq_client, headwas->gq_glist);
             t_freebytes(headwas, sizeof(*headwas));
-            if (sys_bytessincelastping >= wherestop)
+            if (pd_this->pd_inter->i_bytessincelastping >= wherestop)
                 break;
         }
         else break;
@@ -750,13 +958,13 @@ static int sys_poll_togui(void) /* returns 1 if did anything */
         /* in case there is stuff still in the buffer, try to flush it. */
     sys_flushtogui();
         /* if the flush wasn't complete, wait. */
-    if (sys_guibufhead > sys_guibuftail)
+    if (pd_this->pd_inter->i_guihead > pd_this->pd_inter->i_guitail)
         return (0);
-    
+
         /* check for queued updates */
     if (sys_flushqueue())
         return (1);
-    
+
     return (0);
 }
 
@@ -764,19 +972,20 @@ static int sys_poll_togui(void) /* returns 1 if did anything */
     us to back off from doing more updates by faking a big one itself. */
 void sys_pretendguibytes(int n)
 {
-    sys_bytessincelastping += n;
+    pd_this->pd_inter->i_bytessincelastping += n;
 }
 
 void sys_queuegui(void *client, t_glist *glist, t_guicallbackfn f)
 {
     t_guiqueue **gqnextptr, *gq;
-    if (!sys_guiqueuehead)
-        gqnextptr = &sys_guiqueuehead;
+    if (!pd_this->pd_inter->i_guiqueuehead)
+        gqnextptr = &pd_this->pd_inter->i_guiqueuehead;
     else
     {
-        for (gq = sys_guiqueuehead; gq->gq_next; gq = gq->gq_next)
-            if (gq->gq_client == client)
-                return;
+        for (gq = pd_this->pd_inter->i_guiqueuehead; gq->gq_next;
+            gq = gq->gq_next)
+                if (gq->gq_client == client)
+                    return;
         if (gq->gq_client == client)
             return;
         gqnextptr = &gq->gq_next;
@@ -793,15 +1002,17 @@ void sys_queuegui(void *client, t_glist *glist, t_guicallbackfn f)
 void sys_unqueuegui(void *client)
 {
     t_guiqueue *gq, *gq2;
-    while (sys_guiqueuehead && sys_guiqueuehead->gq_client == client)
+    while (pd_this->pd_inter->i_guiqueuehead &&
+        pd_this->pd_inter->i_guiqueuehead->gq_client == client)
     {
-        gq = sys_guiqueuehead;
-        sys_guiqueuehead = sys_guiqueuehead->gq_next;
+        gq = pd_this->pd_inter->i_guiqueuehead;
+        pd_this->pd_inter->i_guiqueuehead =
+            pd_this->pd_inter->i_guiqueuehead->gq_next;
         t_freebytes(gq, sizeof(*gq));
     }
-    if (!sys_guiqueuehead)
+    if (!pd_this->pd_inter->i_guiqueuehead)
         return;
-    for (gq = sys_guiqueuehead; gq2 = gq->gq_next; gq = gq2)
+    for (gq = pd_this->pd_inter->i_guiqueuehead; (gq2 = gq->gq_next); gq = gq2)
         if (gq2->gq_client == client)
     {
         gq->gq_next = gq2->gq_next;
@@ -817,10 +1028,12 @@ int sys_pollgui(void)
 
 void sys_init_fdpoll(void)
 {
+    if (pd_this->pd_inter->i_fdpoll)
+        return;
     /* create an empty FD poll list */
-    sys_fdpoll = (t_fdpoll *)t_getbytes(0);
-    sys_nfdpoll = 0;
-    inbinbuf = binbuf_new();
+    pd_this->pd_inter->i_fdpoll = (t_fdpoll *)t_getbytes(0);
+    pd_this->pd_inter->i_nfdpoll = 0;
+    pd_this->pd_inter->i_inbinbuf = binbuf_new();
 }
 
 /* --------------------- starting up the GUI connection ------------- */
@@ -840,16 +1053,36 @@ void glob_watchdog(t_pd *dummy)
 
 #define FIRSTPORTNUM 5400
 
-#define MAXFONTS 21
-static int defaultfontshit[MAXFONTS] = {
-    8, 5, 9, 10, 6, 10, 12, 7, 13, 14, 9, 17, 16, 10, 19, 24, 15, 28,
-        24, 15, 28};
-#define NDEFAULTFONT (sizeof(defaultfontshit)/sizeof(*defaultfontshit))
+//<<<<<<< HEAD
+//static int sys_do_startgui(const char *libdir)
+//=======
+//#define MAXFONTS 21
+//static int defaultfontshit[MAXFONTS] = {
+    //8, 5, 9, 10, 6, 10, 12, 7, 13, 14, 9, 17, 16, 10, 19, 24, 15, 28,
+        //24, 15, 28};
+//#define NDEFAULTFONT (sizeof(defaultfontshit)/sizeof(*defaultfontshit))
 
-int sys_startgui(const char *libdir)
+void rb_dosend(ring_buffer*);
+void poll_fds();
+void* poll_thread_loop(void* arg)
 {
-    char cmdbuf[4*MAXPDSTRING];
-    struct sockaddr_in server;
+	ring_buffer* sys_guibuf_rb = pd_this->pd_inter->i_guibuf_rb;
+
+	printf("Running polling thread\n");
+	while(1)
+	{
+		poll_fds();
+		rb_dosend(sys_guibuf_rb);
+		usleep(10000);
+	}
+}
+
+//int sys_startgui(const char *libdir)
+//>>>>>>> threaded_microsleep
+static int sys_do_startgui(const char *libdir)
+{
+    char cmdbuf[4*MAXPDSTRING], *guicmd;
+    struct sockaddr_in server = {0};
     int msgsock;
     char buf[15];
     int len = sizeof(server);
@@ -862,57 +1095,19 @@ int sys_startgui(const char *libdir)
     int stdinpipe[2];
     pid_t childpid;
 #endif /* _WIN32 */
+
     sys_init_fdpoll();
-    
-#if !defined(_WIN32) && !defined(__CYGWIN__)
-    signal(SIGHUP, sys_huphandler);
-    signal(SIGINT, sys_exithandler);
-    signal(SIGQUIT, sys_exithandler);
-    signal(SIGILL, sys_exithandler);
-# ifdef SIGIOT
-    signal(SIGIOT, sys_exithandler);
-# endif
-    signal(SIGFPE, SIG_IGN);
-    /* signal(SIGILL, sys_exithandler);
-    signal(SIGBUS, sys_exithandler);
-    signal(SIGSEGV, sys_exithandler); */
-    signal(SIGPIPE, SIG_IGN);
-    signal(SIGALRM, SIG_IGN);
-#if 0  /* GG says: don't use that */
-    signal(SIGSTKFLT, sys_exithandler);
-#endif
-#endif /* NOT _WIN32 && NOT __CYGWIN__ */
 
 #ifdef _WIN32
     if (WSAStartup(version, &nobby)) sys_sockerror("WSAstartup");
 #endif /* _WIN32 */
 
-    if (sys_nogui)
+    if (sys_guisetportnumber)  /* GUI exists and sent us a port number */
     {
-            /* fake the GUI's message giving cwd and font sizes; then
-            skip starting the GUI up. */
-        t_atom zz[NDEFAULTFONT+2];
-        int i;
-#ifdef _WIN32
-        if (GetCurrentDirectory(MAXPDSTRING, cmdbuf) == 0)
-            strcpy(cmdbuf, ".");
-#else
-        if (!getcwd(cmdbuf, MAXPDSTRING))
-            strcpy(cmdbuf, ".");
-        
-#endif
-        SETSYMBOL(zz, gensym(cmdbuf));
-        for (i = 0; i < (int)NDEFAULTFONT; i++)
-            SETFLOAT(zz+i+1, defaultfontshit[i]);
-        SETFLOAT(zz+NDEFAULTFONT+1,0);
-        glob_initfromgui(0, 0, 23, zz);
-    }
-    else if (sys_guisetportnumber)  /* GUI exists and sent us a port number */
-    {
-        struct sockaddr_in server;
+        struct sockaddr_in server = {0};
         struct hostent *hp;
 #ifdef __APPLE__
-            /* sys_guisock might be 1 or 2, which will have offensive results
+            /* guisock might be 1 or 2, which will have offensive results
             if somebody writes to stdout or stderr - so we just open a few
             files to try to fill fds 0 through 2.  (I tried using dup()
             instead, which would seem the logical way to do this, but couldn't
@@ -927,10 +1122,10 @@ int sys_startgui(const char *libdir)
             close(burnfd3);
 #endif
         /* create a socket */
-        sys_guisock = socket(AF_INET, SOCK_STREAM, 0);
-        if (sys_guisock < 0)
+        pd_this->pd_inter->i_guisock = socket(AF_INET, SOCK_STREAM, 0);
+        if (pd_this->pd_inter->i_guisock < 0)
             sys_sockerror("socket");
-        
+
         /* connect socket using hostname provided in command line */
         server.sin_family = AF_INET;
 
@@ -940,7 +1135,7 @@ int sys_startgui(const char *libdir)
         {
             fprintf(stderr,
                 "localhost not found (inet protocol not installed?)\n");
-            exit(1);
+            return (1);
         }
         memcpy((char *)&server.sin_addr, (char *)hp->h_addr, hp->h_length);
 
@@ -948,11 +1143,11 @@ int sys_startgui(const char *libdir)
         server.sin_port = htons((unsigned short)sys_guisetportnumber);
 
             /* try to connect */
-        if (connect(sys_guisock, (struct sockaddr *) &server, sizeof (server))
-            < 0)
+        if (connect(pd_this->pd_inter->i_guisock,
+            (struct sockaddr *) &server, sizeof (server)) < 0)
         {
             sys_sockerror("connecting stream socket");
-            exit(1);
+            return (1);
         }
     }
     else    /* default behavior: start up the GUI ourselves. */
@@ -967,26 +1162,26 @@ int sys_startgui(const char *libdir)
 
         /* create a socket */
         xsock = socket(AF_INET, SOCK_STREAM, 0);
-        if (xsock < 0) sys_sockerror("socket");
-#if 0
-        intarg = 0;
-        if (setsockopt(xsock, SOL_SOCKET, SO_SNDBUF,
-            &intarg, sizeof(intarg)) < 0)
-                post("setsockopt (SO_RCVBUF) failed\n");
-        intarg = 0;
-        if (setsockopt(xsock, SOL_SOCKET, SO_RCVBUF,
-            &intarg, sizeof(intarg)) < 0)
-                post("setsockopt (SO_RCVBUF) failed\n");
-#endif
+        if (xsock < 0)
+        {
+            sys_sockerror("socket");
+            return (1);
+        }
         intarg = 1;
+        if (setsockopt(xsock, SOL_SOCKET, SO_REUSEADDR,
+            &intarg, sizeof(intarg)) < 0)
+#ifndef _WIN32
+                post("setsockopt (SO_REUSEADDR) failed\n")
+#endif
+                    ;
         if (setsockopt(xsock, IPPROTO_TCP, TCP_NODELAY,
             &intarg, sizeof(intarg)) < 0)
 #ifndef _WIN32
                 post("setsockopt (TCP_NODELAY) failed\n")
 #endif
                     ;
-        
-        
+
+
         server.sin_family = AF_INET;
         server.sin_addr.s_addr = INADDR_ANY;
 
@@ -1008,7 +1203,7 @@ int sys_startgui(const char *libdir)
                     "Pd needs your machine to be configured with\n");
                 fprintf(stderr,
                   "'networking' turned on (see Pd's html doc for details.)\n");
-                exit(1);
+                return (1);
             }
             portno++;
             server.sin_port = htons((unsigned short)(portno));
@@ -1018,7 +1213,9 @@ int sys_startgui(const char *libdir)
 
 
 #ifndef _WIN32
-        if (!sys_guicmd)
+        if (sys_guicmd)
+            guicmd = sys_guicmd;
+        else
         {
 #ifdef __APPLE__
             int i;
@@ -1028,16 +1225,16 @@ int sys_startgui(const char *libdir)
             char embed_glob[FILENAME_MAX];
             char home_filename[FILENAME_MAX];
             char *wish_paths[10] = {
-                "(did not find a home directory)",
-                "/Applications/Utilities/Wish.app/Contents/MacOS/Wish",
-                "/Applications/Utilities/Wish Shell.app/Contents/MacOS/Wish Shell",
-                "/Applications/Wish.app/Contents/MacOS/Wish",
-                "/Applications/Wish Shell.app/Contents/MacOS/Wish Shell",
-                "/Library/Frameworks/Tk.framework/Resources/Wish.app/Contents/MacOS/Wish",
-                "/Library/Frameworks/Tk.framework/Resources/Wish Shell.app/Contents/MacOS/Wish Shell",
-                "/System/Library/Frameworks/Tk.framework/Resources/Wish.app/Contents/MacOS/Wish",
-                "/System/Library/Frameworks/Tk.framework/Resources/Wish Shell.app/Contents/MacOS/Wish Shell",
-                "/usr/bin/wish"
+ "(did not find a home directory)",
+ "/Applications/Utilities/Wish.app/Contents/MacOS/Wish",
+ "/Applications/Utilities/Wish Shell.app/Contents/MacOS/Wish Shell",
+ "/Applications/Wish.app/Contents/MacOS/Wish",
+ "/Applications/Wish Shell.app/Contents/MacOS/Wish Shell",
+ "/Library/Frameworks/Tk.framework/Resources/Wish.app/Contents/MacOS/Wish",
+ "/Library/Frameworks/Tk.framework/Resources/Wish Shell.app/Contents/MacOS/Wish Shell",
+ "/System/Library/Frameworks/Tk.framework/Resources/Wish.app/Contents/MacOS/Wish",
+ "/System/Library/Frameworks/Tk.framework/Resources/Wish Shell.app/Contents/MacOS/Wish Shell",
+ "/usr/bin/wish"
             };
             /* this glob is needed so the Wish executable can have the same
              * filename as the Pd.app, i.e. 'Pd-0.42-3.app' should have a Wish
@@ -1060,11 +1257,12 @@ int sys_startgui(const char *libdir)
                 for(i=0; i<10; i++)
                 {
                     if (sys_verbose)
-                        fprintf(stderr, "Trying Wish at \"%s\"\n", wish_paths[i]);
+                        fprintf(stderr, "Trying Wish at \"%s\"\n",
+                            wish_paths[i]);
                     if (stat(wish_paths[i], &statbuf) >= 0)
                         break;
                 }
-                sprintf(cmdbuf, "\"%s\" \"%s/%spd-gui.tcl\" %d\n", 
+                sprintf(cmdbuf, "\"%s\" \"%s/%spd-gui.tcl\" %d\n",
                         wish_paths[i], libdir, PDGUIDIR, portno);
             }
 #else /* __APPLE__ */
@@ -1077,11 +1275,11 @@ int sys_startgui(const char *libdir)
                  libdir, libdir, (getenv("HOME") ? "" : " HOME=/tmp"),
                     libdir, portno);
 #endif /* __APPLE__ */
-            sys_guicmd = cmdbuf;
+			printf("running: %s\n", cmdbuf);
+            guicmd = cmdbuf;
         }
-
-        if (sys_verbose) 
-            fprintf(stderr, "%s", sys_guicmd);
+        if (sys_verbose)
+            fprintf(stderr, "%s", guicmd);
 
         childpid = fork();
         if (childpid < 0)
@@ -1093,6 +1291,7 @@ int sys_startgui(const char *libdir)
         else if (!childpid)                     /* we're the child */
         {
             setuid(getuid());          /* lose setuid priveliges */
+            sys_closesocket(xsock);    /* child doesn't listen */
 #ifndef __APPLE__
 // TODO this seems unneeded on any platform hans@eds.org
                 /* the wish process in Unix will make a wish shell and
@@ -1111,31 +1310,31 @@ int sys_startgui(const char *libdir)
                 }
             }
 #endif /* NOT __APPLE__ */
-            execl("/bin/sh", "sh", "-c", sys_guicmd, (char*)0);
+            execl("/bin/sh", "sh", "-c", guicmd, (char*)0);
             perror("pd: exec");
             fprintf(stderr, "Perhaps tcl and tk aren't yet installed?\n");
             _exit(1);
        }
 #else /* NOT _WIN32 */
         /* fprintf(stderr, "%s\n", libdir); */
-        
+
         strcpy(scriptbuf, "\"");
         strcat(scriptbuf, libdir);
         strcat(scriptbuf, "/" PDGUIDIR "pd-gui.tcl\"");
         sys_bashfilename(scriptbuf, scriptbuf);
-        
+
         sprintf(portbuf, "%d", portno);
 
         strcpy(wishbuf, libdir);
         strcat(wishbuf, "/" PDBINDIR WISHAPP);
         sys_bashfilename(wishbuf, wishbuf);
-        
+
         spawnret = _spawnl(P_NOWAIT, wishbuf, WISHAPP, scriptbuf, portbuf, 0);
         if (spawnret < 0)
         {
             perror("spawnl");
             fprintf(stderr, "%s: couldn't load TCL\n", wishbuf);
-            exit(1);
+            return (1);
         }
 
 #endif /* NOT _WIN32 */
@@ -1169,7 +1368,7 @@ int sys_startgui(const char *libdir)
     }
     else if (sys_verbose)
         post("not setting real-time priority");
-    
+
     if (sys_hipriority)
     {
             /* To prevent lockup, we fork off a watchdog process with
@@ -1202,6 +1401,7 @@ int sys_startgui(const char *libdir)
         {
             sys_set_priority(1);
             setuid(getuid());      /* lose setuid priveliges */
+            sys_closesocket(xsock);    /* child doesn't listen */
             if (pipe9[1] != 0)
             {
                 dup2(pipe9[0], 0);
@@ -1257,21 +1457,23 @@ int sys_startgui(const char *libdir)
             fprintf(stderr, "Waiting for connection request... \n");
         if (listen(xsock, 5) < 0) sys_sockerror("listen");
 
-        sys_guisock = accept(xsock, (struct sockaddr *) &server, 
-            (socklen_t *)&len);
-#ifdef OOPS
+        pd_this->pd_inter->i_guisock = accept(xsock,
+            (struct sockaddr *) &server, (socklen_t *)&len);
+
         sys_closesocket(xsock);
-#endif
-        if (sys_guisock < 0) sys_sockerror("accept");
+
+        if (pd_this->pd_inter->i_guisock < 0) sys_sockerror("accept");
         if (sys_verbose)
             fprintf(stderr, "... connected\n");
+        pd_this->pd_inter->i_guihead = pd_this->pd_inter->i_guitail = 0;
     }
     if (!sys_nogui)
     {
         char buf[256], buf2[256];
-        sys_socketreceiver = socketreceiver_new(0, 0, 0, 0);
-        sys_addpollfn(sys_guisock, (t_fdpollfn)socketreceiver_read,
-            sys_socketreceiver);
+        pd_this->pd_inter->i_socketreceiver = socketreceiver_new(0, 0, 0, 0);
+        sys_addpollfn(pd_this->pd_inter->i_guisock,
+            (t_fdpollfn)socketreceiver_read,
+                pd_this->pd_inter->i_socketreceiver);
 
             /* here is where we start the pinging. */
 #if defined(__linux__) || defined(__FreeBSD_kernel__)
@@ -1285,10 +1487,12 @@ int sys_startgui(const char *libdir)
         sys_set_startup();
                            /* ... and about font, medio APIS, etc */
         sys_vgui("pdtk_pd_startup %d %d %d {%s} %s %s {%s} %s\n",
-                 PD_MAJOR_VERSION, PD_MINOR_VERSION, 
+                 PD_MAJOR_VERSION, PD_MINOR_VERSION,
                  PD_BUGFIX_VERSION, PD_TEST_VERSION,
-                 buf, buf2, sys_font, sys_fontweight); 
+                 buf, buf2, sys_font, sys_fontweight);
         sys_vgui("set pd_whichapi %d\n", sys_audioapi);
+		pthread_t fdPollThread;
+		pthread_create(&fdPollThread, NULL, poll_thread_loop, NULL);
     }
     return (0);
 }
@@ -1304,8 +1508,9 @@ void sys_bail(int n)
     if (!reentered)
     {
         reentered = 1;
-#if !defined(__linux__) && !defined(__FreeBSD_kernel__) && !defined(__GNU__) /* sys_close_audio() hangs if you're in a signal? */
-        fprintf(stderr ,"sys_guisock %d - ", sys_guisock);
+#if !defined(__linux__) && !defined(__FreeBSD_kernel__) && !defined(__GNU__)
+            /* sys_close_audio() hangs if you're in a signal? */
+        fprintf(stderr ,"gui socket %d - ", pd_this->pd_inter->i_guisock);
         fprintf(stderr, "closing audio...\n");
         sys_close_audio();
         fprintf(stderr, "closing MIDI...\n");
@@ -1323,10 +1528,45 @@ void glob_quit(void *dummy)
     sys_close_midi();
     if (!sys_nogui)
     {
-        sys_closesocket(sys_guisock);
-        sys_rmpollfn(sys_guisock);
+        sys_closesocket(pd_this->pd_inter->i_guisock);
+        sys_rmpollfn(pd_this->pd_inter->i_guisock);
     }
-    exit(0); 
+    exit(0);
+}
+
+    /* recursively descend to all canvases and send them "vis" messages
+    if they believe they're visible, to make it really so. */
+static void glist_maybevis(t_glist *gl)
+{
+    t_gobj *g;
+    for (g = gl->gl_list; g; g = g->g_next)
+        if (pd_class(&g->g_pd) == canvas_class)
+            glist_maybevis((t_glist *)g);
+    if (gl->gl_havewindow)
+    {
+        canvas_vis(gl, 0);
+        canvas_vis(gl, 1);
+    }
+}
+
+int sys_startgui(const char *libdir)
+{
+    t_canvas *x;
+    for (x = pd_getcanvaslist(); x; x = x->gl_next)
+        canvas_vis(x, 0);
+    sys_nogui = 0;
+    pd_this->pd_inter->i_guihead = pd_this->pd_inter->i_guitail = 0;
+    if (sys_do_startgui(libdir))
+        return (-1);
+    for (x = pd_getcanvaslist(); x; x = x->gl_next)
+        if (strcmp(x->gl_name->s_name, "_float_template") &&
+            strcmp(x->gl_name->s_name, "_float_array_template") &&
+                strcmp(x->gl_name->s_name, "_text_template"))
+    {
+        glist_maybevis(x);
+        canvas_vis(x, 1);
+    }
+    return (0);
 }
 
  /* more work needed here - for some reason we can't restart the gui after
@@ -1334,12 +1574,125 @@ void glob_quit(void *dummy)
  it because the to-gui buffer isn't re-initialized. */
 void sys_stopgui( void)
 {
-    if (sys_guisock >= 0)
+    t_canvas *x;
+    for (x = pd_getcanvaslist(); x; x = x->gl_next)
+        canvas_vis(x, 0);
+    sys_vgui("%s", "exit\n");
+    if (pd_this->pd_inter->i_guisock >= 0)
     {
-        sys_closesocket(sys_guisock);
-        sys_rmpollfn(sys_guisock);
-        sys_guisock = -1;
-        sys_guicmd = 0;
+        sys_closesocket(pd_this->pd_inter->i_guisock);
+        sys_rmpollfn(pd_this->pd_inter->i_guisock);
+        pd_this->pd_inter->i_guisock = -1;
     }
     sys_nogui = 1;
 }
+
+/* ----------- mutexes for thread safety --------------- */
+
+void s_inter_newpdinstance( void)
+{
+    pd_this->pd_inter = getbytes(sizeof(*pd_this->pd_inter));
+#if PDTHREADS
+    pthread_mutex_init(&pd_this->pd_inter->i_mutex, NULL);
+    pd_this->pd_islocked = 0;
+#endif
+#ifdef _WIN32
+    pd_this->pd_inter->i_freq = 0;
+#endif
+}
+
+void s_inter_freepdinstance( void)
+{
+    freebytes(pd_this->pd_inter, sizeof(*pd_this->pd_inter));
+}
+
+//<<<<<<< HEAD
+#if PDTHREADS
+#ifdef PDINSTANCE
+static pthread_rwlock_t sys_rwlock = PTHREAD_RWLOCK_INITIALIZER;
+#else /* PDINSTANCE */
+static pthread_mutex_t sys_mutex = PTHREAD_MUTEX_INITIALIZER;
+#endif /* PDINSTANCE */
+#endif /* PDTHREADS */
+
+#if PDTHREADS
+
+/* routines to lock and unlock Pd's global class structure or list of Pd
+instances.  These are called internally within Pd when creating classes, adding
+methods to them, or creating or freeing Pd instances.  They should probably
+not be called from outside Pd.  They should be called at a point where the
+current instance of Pd is currently locked via sys_lock() below; this gains
+read access to the class and instance lists which must be released for the
+write-lock to be available. */
+
+void pd_globallock( void)
+{
+#ifdef PDINSTANCE
+    if (!pd_this->pd_islocked)
+        bug("pd_globallock");
+    pthread_rwlock_unlock(&sys_rwlock);
+    pthread_rwlock_wrlock(&sys_rwlock);
+#endif /* PDINSTANCE */
+}
+
+void pd_globalunlock( void)
+{
+#ifdef PDINSTANCE
+    pthread_rwlock_unlock(&sys_rwlock);
+    pthread_rwlock_rdlock(&sys_rwlock);
+#endif /* PDINSTANCE */
+}
+
+/* routines to lock/unlock a Pd instance for thread safety.  Call pd_setinsance
+first.  The "pd_this"  variable can be written and read thread-safely as it
+is defined as per-thread storage. */
+void sys_lock( void)
+{
+#ifdef PDINSTANCE
+    pthread_mutex_lock(&pd_this->pd_inter->i_mutex);
+    pthread_rwlock_rdlock(&sys_rwlock);
+    pd_this->pd_islocked = 1;
+#else
+    pthread_mutex_lock(&sys_mutex);
+#endif
+}
+
+void sys_unlock( void)
+{
+#ifdef PDINSTANCE
+    pd_this->pd_islocked = 0;
+    pthread_rwlock_unlock(&sys_rwlock);
+    pthread_mutex_unlock(&pd_this->pd_inter->i_mutex);
+#else
+    pthread_mutex_unlock(&sys_mutex);
+#endif
+}
+
+int sys_trylock( void)
+{
+#ifdef PDINSTANCE
+    int ret;
+    if (!(ret = pthread_mutex_trylock(&pd_this->pd_inter->i_mutex)))
+    {
+        if (!(ret = pthread_rwlock_tryrdlock(&sys_rwlock)))
+            return (0);
+        else
+        {
+            pthread_mutex_unlock(&pd_this->pd_inter->i_mutex);
+            return (ret);
+        }
+    }
+    else return (ret);
+#else
+    return pthread_mutex_trylock(&sys_mutex);
+#endif
+}
+
+#else /* PDTHREADS */
+
+void sys_lock( void) {}
+void sys_unlock( void) {}
+void pd_globallock( void) {}
+void pd_globalunlock( void) {}
+
+#endif /* PDTHREADS */
