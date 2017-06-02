@@ -67,6 +67,7 @@ static void clip_setup(void)
 #define DUMTAB1SIZE 256
 #define DUMTAB2SIZE 1024
 
+/* These are only written at setup time when there's a global lock in place. */
 static float rsqrt_exptab[DUMTAB1SIZE], rsqrt_mantissatab[DUMTAB2SIZE];
 
 static void init_rsqrt(void)
@@ -670,10 +671,11 @@ typedef struct _log_tilde
     t_float x_f;
 } t_log_tilde;
 
-static void *log_tilde_new( void)
+static void *log_tilde_new(t_floatarg f)
 {
     t_log_tilde *x = (t_log_tilde *)pd_new(log_tilde_class);
-    inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_signal, &s_signal);
+    pd_float(
+        (t_pd *)inlet_new(&x->x_obj, &x->x_obj.ob_pd, &s_signal, &s_signal), f);
     outlet_new(&x->x_obj, &s_signal);
     x->x_f = 0;
     return (x);
