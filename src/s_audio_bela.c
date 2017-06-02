@@ -16,10 +16,8 @@ typedef struct _bela_callback_args_struct
     t_audiocallback callbackfn;
 } bela_callback_args;
 
-bool setup(BelaContext* context, void* belaArgs)
-{
-    return true;
-}
+static void _render(BelaContext* context, void* userArgs);
+static void _cleanup(BelaContext* context, void* userArgs);
 
 int bela_open_audio(int inchans, int outchans, int rate, t_sample *soundin,
     t_sample *soundout, int framesperbuf, int nbuffers,
@@ -32,6 +30,8 @@ int bela_open_audio(int inchans, int outchans, int rate, t_sample *soundin,
 	}
     BelaInitSettings settings;
     Bela_defaultSettings(&settings);
+	settings.render = _render;
+	settings.cleanup = _cleanup;
 	settings.periodSize = framesperbuf;
     if(inchans <= 2)
     {
@@ -80,7 +80,7 @@ int bela_open_audio(int inchans, int outchans, int rate, t_sample *soundin,
 	return 0;
 }
 
-void render(BelaContext* context, void* userArgs)
+void _render(BelaContext* context, void* userArgs)
 {
     bela_callback_args* args = (bela_callback_args*)userArgs;
     t_audiocallback callbackfn = args->callbackfn;
@@ -170,7 +170,7 @@ void render(BelaContext* context, void* userArgs)
     memset((void*)soundout, 0, (size_t)(context->audioFrames * context->audioOutChannels * sizeof(t_sample)));
 }
 
-void cleanup(BelaContext* context, void* userArgs)
+void _cleanup(BelaContext* context, void* userArgs)
 {
     // release the structure that was allocated in bela_open_audio()
     free(userArgs);
