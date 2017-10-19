@@ -47,26 +47,49 @@
 # define stat  stat64
 #endif
 
+sys_remapfilename(const char *from, char *to)
+{
+    const char* remapPathSearch = "BELABOOT/";
+    const char* remapPathReplace = "/boot/uboot/";
+    char* start = NULL;
+    start = strstr(from, remapPathSearch);
+    if(start)
+    {
+        strcpy(to, remapPathReplace);
+        strcpy(to + strlen(remapPathReplace), start + strlen(remapPathSearch));
+        printf("Reading file %s instead of %s\n", to, from);
+    }
+	else
+	{
+	    strcpy(to, from);
+	}
+}
 
     /* change '/' characters to the system's native file separator */
 void sys_bashfilename(const char *from, char *to)
 {
-    char c;
-    while ((c = *from++))
-    {
+    sys_remapfilename(from, to);
+	char* tmp = (char*)alloca(strlen(to) + 1);
+	strcpy(tmp, to);
 #ifdef _WIN32
+    char c;
+    while ((c = *tmp++))
+    {
         if (c == '/') c = '\\';
-#endif
         *to++ = c;
     }
     *to = 0;
+#endif
 }
 
     /* change the system's native file separator to '/' characters  */
 void sys_unbashfilename(const char *from, char *to)
 {
+    sys_remapfilename(from, to);
+	char* tmp = (char*)alloca(strlen(to) + 1);
+	strcpy(tmp, to);
     char c;
-    while ((c = *from++))
+    while ((c = *tmp++))
     {
 #ifdef _WIN32
         if (c == '\\') c = '/';

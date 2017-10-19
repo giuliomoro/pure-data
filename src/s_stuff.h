@@ -61,6 +61,7 @@ EXTERN void sys_register_loader(loader_t loader);
 #define SENDDACS_SLEPT 2
 
 #define DEFDACBLKSIZE 64
+//extern int sys_schedblocksize;  /* audio block size for scheduler */
 extern int sys_hipriority;      /* real-time flag, true if priority boosted */
 extern int sys_schedadvance;
 extern int sys_sleepgrain;
@@ -175,15 +176,17 @@ EXTERN_STRUCT _socketreceiver;
 typedef void (*t_socketnotifier)(void *x, int n);
 typedef void (*t_socketreceivefn)(void *x, t_binbuf *b);
 
+#include "ringbuffer.h"
 EXTERN t_socketreceiver *socketreceiver_new(void *owner,
     t_socketnotifier notifier, t_socketreceivefn socketreceivefn, int udp);
-EXTERN void socketreceiver_read(t_socketreceiver *x, int fd);
+EXTERN void socketreceiver_read(t_socketreceiver *x, ring_buffer* rb, int fd);
 EXTERN void sys_sockerror(char *s);
 EXTERN void sys_closesocket(int fd);
 
-typedef void (*t_fdpollfn)(void *ptr, int fd);
+typedef void (*t_fdpollfn)(void *ptr, ring_buffer* rb, int fd);
 EXTERN void sys_addpollfn(int fd, t_fdpollfn fn, void *ptr);
 EXTERN void sys_rmpollfn(int fd);
+EXTERN int rb_recv(ring_buffer* rb, char* buf, size_t length, void* nothing);
 #if defined(USEAPI_OSS) || defined(USEAPI_ALSA)
 void sys_setalarm(int microsec);
 #endif
@@ -198,6 +201,7 @@ void sys_setalarm(int microsec);
 #define API_AUDIOUNIT 7
 #define API_ESD 8           /* no idea what this was, probably gone now */
 #define API_DUMMY 9
+#define API_BELA 10
 
     /* figure out which API should be the default.  The one we judge most
     likely to offer a working device takes precedence so that if you
@@ -205,7 +209,10 @@ void sys_setalarm(int microsec);
     sound.  (You'd think portaudio would be best but it seems to default
     to jack on linux, and and on Windows we only use it for ASIO).
     If nobody shows up, define DUMMY and make it the default.*/
-#if defined(USEAPI_MMIO)
+#if defined(USEAPI_BELA)
+# define API_DEFAULT API_BELA
+# define API_DEFSTRING "BELA"
+#elif defined(USEAPI_MMIO)
 # define API_DEFAULT API_MMIO
 # define API_DEFSTRING "MMIO"
 #elif defined(USEAPI_ALSA)
