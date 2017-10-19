@@ -95,7 +95,8 @@ pd_SOURCES = \
     x_time.c \
     x_vexp.c \
     x_vexp_fun.c \
-    x_vexp_if.c
+    x_vexp_if.c \
+	ringbuffer.c
 
 # declared for ASIO
 nodist_EXTRA_pd_SOURCES =
@@ -162,6 +163,14 @@ endif
 if MMIO
 pd_CFLAGS += -DUSEAPI_MMIO
 pd_SOURCES += s_audio_mmio.c
+endif
+
+##### BELA #####
+if BELA
+pd_CFLAGS += -DUSEAPI_BELA
+pd_LDADD += -lbela -lrt -lnative -lxenomai -lpthread_rt
+pd_LDFLAGS += -Wl,@/usr/xenomai/lib/posix.wrappers -L/usr/xenomai/lib 
+pd_SOURCES += s_audio_bela.c
 endif
 
 ##### PortAudio #####
