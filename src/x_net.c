@@ -52,7 +52,6 @@ typedef struct _netreceive
 } t_netreceive;
 
 static void netreceive_notify(t_netreceive *x, int fd);
-ssize_t sys_send(int sockfd, const void *buf, size_t len, int flags);
 
 static void *netsend_new(t_symbol *s, int argc, t_atom *argv)
 {

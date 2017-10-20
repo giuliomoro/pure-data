@@ -188,6 +188,7 @@ EXTERN void sys_closesocket(int fd);
 typedef void (*t_fdpollfn)(void *ptr, ring_buffer* rb, int fd);
 EXTERN void sys_addpollfn(int fd, t_fdpollfn fn, void *ptr);
 EXTERN void sys_rmpollfn(int fd);
+ssize_t sys_send(int sockfd, const void *buf, size_t len, int flags);
 EXTERN int rb_recv(ring_buffer* rb, char* buf, size_t length, void* nothing);
 #if defined(USEAPI_OSS) || defined(USEAPI_ALSA)
 void sys_setalarm(int microsec);
