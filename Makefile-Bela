@@ -20,10 +20,10 @@ PLATFORM_CFLAGS = -DHAVE_LIBDL -Wno-int-to-pointer-cast \
 # A more orthodox way would be to use xeno-config
 XENO_PATH?=/usr/local/linaro/arm-linux-gnueabihf/xenomai/
 #XENO_POSIX_CFLAGS:=$(shell DESTDIR=$(XENO_DESTDIR) $(XENO_CONFIG) --skin=posix --cflags)
-XENO_POSIX_CFLAGS:=-I$(XENO_PATH)/include -D_GNU_SOURCE -D_REENTRANT -D__XENO__ -I$(XENO_PATH)/posix
+XENO_POSIX_CFLAGS:=`/usr/xenomai/bin/xeno-config --skin=posix --cflags`
 #XENO_POSIX_LIBS:=$(shell DESTDIR=$(XENO_DESTDIR) $(XENO_CONFIG) --skin=posix --ldflags)
 #XENO_POSIX_LIBS:=-Wl,@$(XENO_PATH)/lib/posix.wrappers -L$(XENO_PATH)/lib `/usr/xenomai/bin/xeno-config --native --ldflags`
-XENO_POSIX_LIBS:=`/usr/xenomai/bin/xeno-config --posix --ldflags --auto-init-solib`
+XENO_POSIX_LIBS:=$(shell /usr/xenomai/bin/xeno-config --skin=posix --ldflags --no-auto-init 2>/dev/null || /usr/xenomai/bin/xeno-config --skin=posix --ldflags)
 XENO_LIB_PATH ?= $(XENO_PATH)/lib/
 U = /Users/Giulio/arm/usr
 
@@ -59,6 +59,7 @@ PD_FILES = \
 	pure-data/src/x_gui.c pure-data/src/x_interface.c pure-data/src/x_list.c \
 	pure-data/src/x_midi.c pure-data/src/x_misc.c pure-data/src/x_net.c \
 	pure-data/src/x_scalar.c pure-data/src/x_text.c pure-data/src/x_time.c \
+	pure-data/src/x_vexp.c pure-data/src/x_vexp_fun.c pure-data/src/x_vexp_if.c \
 	libpd_wrapper/s_libpdmidi.c libpd_wrapper/x_libpdreceive.c \
 	libpd_wrapper/z_hooks.c libpd_wrapper/z_libpd.c
 
@@ -75,8 +76,7 @@ PD_EXTRA_FILES_ORIG = \
 # in libpd_wrapper/z_libpd.c as well.
 PD_EXTRA_FILES= \
 	pure-data/extra/bob~/bob~.c pure-data/extra/bonk~/bonk~.c \
-	pure-data/extra/choice/choice.c pure-data/extra/expr~/vexp_fun.c \
-	pure-data/extra/expr~/vexp_if.c pure-data/extra/expr~/vexp.c \
+	pure-data/extra/choice/choice.c \
 	pure-data/extra/fiddle~/fiddle~.c pure-data/extra/loop~/loop~.c \
 	pure-data/extra/lrshift~/lrshift~.c pure-data/extra/pique/pique.c \
 	pure-data/extra/sigmund~/sigmund~.c pure-data/extra/stdout/stdout.c 
@@ -104,9 +104,9 @@ ifeq ($(EXTRA), true)
 endif
 
 # conditional optimizations or debug settings
-OPT_CFLAGS = -mtune=cortex-a8 -mfloat-abi=hard -mfpu=neon -ftree-vectorize -O2 -save-temps $(COMPILER_SPECIFIC_FLAGS)
+OPT_CFLAGS = -mtune=cortex-a8 -mfloat-abi=hard -mfpu=neon -ftree-vectorize -O2 $(COMPILER_SPECIFIC_FLAGS)
 ifeq ($(DEBUG), true)
-	OPT_CFLAGS = -Wall -g
+	OPT_CFLAGS = -Wall -g -O0
 endif
 # object files which are somehow generated but not from sources listed above,
 # there is probably a better fix but this works for now
