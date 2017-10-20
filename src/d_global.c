@@ -7,7 +7,7 @@
 #include "m_pd.h"
 #include <string.h>
 
-#define DEFSENDVS 64    /* LATER get send to get this from canvas */
+#define DEFSENDVS 8    /* LATER get send to get this from canvas */
 
 /* ----------------------------- send~ ----------------------------- */
 static t_class *sigsend_class;
