@@ -166,6 +166,8 @@ void sched_set_using_audio(int flag);
 
 EXTERN void sys_microsleep(int microsec);
 EXTERN void sys_init_fdpoll(void);
+EXTERN void sys_doio(t_pdinstance* pd_that);
+EXTERN void sys_dontmanageio(int status);
 
 EXTERN void sys_bail(int exitcode);
 EXTERN int sys_pollgui(void);

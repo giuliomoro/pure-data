@@ -52,6 +52,7 @@ typedef struct _netreceive
 } t_netreceive;
 
 static void netreceive_notify(t_netreceive *x, int fd);
+ssize_t sys_send(int sockfd, const void *buf, size_t len, int flags);
 
 static void *netsend_new(t_symbol *s, int argc, t_atom *argv)
 {
@@ -254,8 +255,8 @@ static void netsend_connect(t_netsend *x, t_symbol *s, int argc, t_atom *argv)
         sys_closesocket(sockfd);
         return;
       }
-
     x->x_sockfd = sockfd;
+
     if (x->x_msgout)    /* add polling function for return messages */
       {
         if (x->x_bin)
@@ -310,7 +311,7 @@ static int netsend_dosend(t_netsend *x, int sockfd,
         static double lastwarntime;
         static double pleasewarn;
         double timebefore = sys_getrealtime();
-        int res = send(sockfd, bp, length-sent, 0);
+        int res = sys_send(sockfd, bp, length-sent, 0);
         double timeafter = sys_getrealtime();
         int late = (timeafter - timebefore > 0.005);
         if (late || pleasewarn)

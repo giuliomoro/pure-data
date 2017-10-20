@@ -118,6 +118,9 @@ typedef struct _guiqueue
 struct _instanceinter
 {
     int i_havegui;
+    ring_buffer* i_rbsend;
+    pthread_t i_iothread;
+    int i_dontmanageio;
     int i_nfdpoll;
     t_fdpoll *i_fdpoll;
     int i_maxfd;
@@ -145,18 +148,6 @@ struct _instanceinter
 
 void rb_dosend(ring_buffer*);
 static void poll_fds();
-void* poll_thread_loop(void* arg)
-{
-	ring_buffer* sys_guibuf_rb = pd_this->pd_inter->i_guibuf_rb;
-
-	printf("Running polling thread\n");
-	while(1)
-	{
-		poll_fds();
-		rb_dosend(sys_guibuf_rb);
-		usleep(3000);
-	}
-}
 
 extern int sys_guisetportnumber;
 extern int sys_addhist(int phase);
@@ -230,7 +221,7 @@ typedef struct _netsend
 } t_netsend;
 
 void netsend_readbin(t_netsend *x, ring_buffer* rb, int fd);
-static void poll_fds()
+static void poll_fds(t_pdinstance* pd_that)
 {
     const unsigned int maxRecv = RB_SIZE; // an arbitrary limit per call to recv, which will be further narrowed down below on a per-socket basis
     char* buf;
@@ -240,42 +231,42 @@ static void poll_fds()
     t_fdpoll *fp;
     timout.tv_sec = 0;
     timout.tv_usec = 0;
-    if(pd_this->pd_inter->i_data_available)
+    if(pd_that->pd_inter->i_data_available)
     {
         // silly "locking" mechanism to ensure we do not mess around with the fds 
         // while they may be re-allocated as a consequence of an incoming packet
         // (typically: when we accept() a new TCP connection.
         // Of course this is not enough, because fdpoll manipulation could happen 
         // at any time
-        printf("Locked\n");
+        // printf("Locked\n");
         return;
     }
-    t_fdpoll* sys_fdpoll = pd_this->pd_inter->i_fdpoll;
+    t_fdpoll* sys_fdpoll = pd_that->pd_inter->i_fdpoll;
     if (1)
     {
         fd_set readset, writeset, exceptset;
         FD_ZERO(&writeset);
         FD_ZERO(&readset);
         FD_ZERO(&exceptset);
-        for (fp = pd_this->pd_inter->i_fdpoll,
-            i = pd_this->pd_inter->i_nfdpoll; i--; fp++)
+        for (fp = pd_that->pd_inter->i_fdpoll,
+            i = pd_that->pd_inter->i_nfdpoll; i--; fp++)
             {
                 if(fp->fdp_fd == -1){
-                    printf("fdp == -1: %p %l\n", fp, fp - pd_this->pd_inter->i_fdpoll);
+                    printf("fdp == -1: %p %l\n", fp, fp - pd_that->pd_inter->i_fdpoll);
                     continue;
                 }
                 FD_SET(fp->fdp_fd, &readset);
             }
 #ifdef _WIN32
-        if (pd_this->pd_inter->i_maxfd == 0)
+        if (pd_that->pd_inter->i_maxfd == 0)
                 Sleep(microsec/1000);
         else
 #endif
-        if(select(pd_this->pd_inter->i_maxfd+1,
+        if(select(pd_that->pd_inter->i_maxfd+1,
                   &readset, &writeset, &exceptset, &timout) < 0)
           perror("microsleep select");
-        for (i = 0; i < pd_this->pd_inter->i_nfdpoll; i++)
-            if (FD_ISSET(pd_this->pd_inter->i_fdpoll[i].fdp_fd, &readset))
+        for (i = 0; i < pd_that->pd_inter->i_nfdpoll; i++)
+            if (FD_ISSET(pd_that->pd_inter->i_fdpoll[i].fdp_fd, &readset))
 		{
             int fd = sys_fdpoll[i].fdp_fd;
             ring_buffer* rb = sys_fdpoll[i].rb;
@@ -286,7 +277,7 @@ static void poll_fds()
             {
                 //if the callback is not thread-safe, schedule it to be called from the audio thread
                 // printf("scheduling callback for %d\n", i);
-                pd_this->pd_inter->i_data_available = 1;
+                pd_that->pd_inter->i_data_available = 1;
                 sys_fdpoll[i].data_available = 1;
                 break; // This is our way of being thread-safe, combined with the "locking" mechansim above
             }
@@ -308,11 +299,23 @@ static void poll_fds()
     free(buf);
 }
 
+void sys_doio(t_pdinstance* pd_that)
+{
+    poll_fds(pd_that);
+    rb_dosend(pd_that->pd_inter->i_guibuf_rb);
+    rb_dosend(pd_that->pd_inter->i_rbsend);
+}
+void sys_startiothread();
+
 int sys_domicrosleep(int microsec, int pollem)
 {
     int i, didsomething = 0;
     if (pollem)
     {
+	if(!pd_this->pd_inter->i_dontmanageio)
+	{
+            sys_doio(pd_this);
+	}
         for (i = 0; i < pd_this->pd_inter->i_nfdpoll; i++)
         {
             if(pd_this->pd_inter->i_fdpoll[i].data_available)
@@ -521,16 +524,56 @@ void sys_sockerror(char *s)
 #endif
     post("%s: %s (%d)\n", s, strerror(err), err);
 }
+
+void sys_dontmanageio(int status)
+{
+    pd_this->pd_inter->i_dontmanageio = status;
+}
+
+static void* poll_thread_loop(void* arg)
+{
+    printf("Running polling thread\n");
+    t_pdinstance* pd_that = (t_pdinstance*)arg;
+    while(1)
+    {
+        sys_doio(pd_that);
+        usleep(3000);
+    }
+}
+
+void sys_startiothread()
+{
+    sys_dontmanageio(1);
+    if(pd_this->pd_inter->i_iothread == 0)
+    {
+        pthread_create(&pd_this->pd_inter->i_iothread, NULL, poll_thread_loop, (void*)pd_this);
+        pthread_setname_np(pd_this->pd_inter->i_iothread, "libpd-fdPollThread");
+    }
+}
+
+int init_rbsend()
+{
+    if(!pd_this->pd_inter->i_rbsend)
+        pd_this->pd_inter->i_rbsend = rb_create(8 * RB_SIZE);
+    if(!pd_this->pd_inter->i_rbsend)
+    {
+        perror("unable to create ring buffer for outgoing network packets");
+        return -1;
+    }
+    return 0;
+}
+
+ssize_t sys_send(int sockfd, const void *buf, size_t len, int flags)
+{
+    if(init_rbsend())
+        return -1;
+    return rb_send(pd_this->pd_inter->i_rbsend, sockfd, buf, len, flags);
+}
+
 void sys_addpollfn(int fd, t_fdpollfn fn, void *ptr)
 {
     int nfd, size;
     t_fdpoll *fp;
-    static pthread_t fdPollThread = 0;
-    if(fdPollThread == 0)
-    {
-        __wrap_pthread_create(&fdPollThread, NULL, poll_thread_loop, NULL);
-        __wrap_pthread_setname_np(fdPollThread, "libpd-fdPollThread");
-    }
     sys_init_fdpoll();
     nfd = pd_this->pd_inter->i_nfdpoll;
     size = nfd * sizeof(t_fdpoll);
@@ -542,7 +585,7 @@ void sys_addpollfn(int fd, t_fdpollfn fn, void *ptr)
     fp->fdp_ptr = ptr;
     fp->rb = rb_create(RB_SIZE);
     fp->data_available = 0;
-    printf("Created rb for fd %d: %p\n", fp->fdp_fd, fp->rb);
+    // printf("Created rb for fd %d: %p\n", fp->fdp_fd, fp->rb);
     pd_this->pd_inter->i_nfdpoll = nfd + 1;
     if (fd >= pd_this->pd_inter->i_maxfd)
         pd_this->pd_inter->i_maxfd = fd + 1;
@@ -632,7 +675,7 @@ int rb_recv(ring_buffer* rb, char* buf, size_t length, void* nothing)
     ret = rb_read_from_buffer(rb, buf, actualLength);
     if(ret)
     {
-        printf("Error while reading from buffer: %d\n", ret);
+        perror("Error while reading from ring_buffer in rb_recv");
         return -1;
     }
     return actualLength;
@@ -888,9 +931,10 @@ void sys_gui(char *s)
 }
 
 
+// It is safe to call this from a real-time thread
 ssize_t rb_send(ring_buffer* rb, int socket, const void *buffer, size_t length, int flags)
 {
-    printf("rb_send: fd: %d, rb: %p\n", socket, rb);
+    //printf("rb_send: fd: %d, rb: %p \"%s\"\n", socket, rb, (char*)buffer);
     size_t maxLength = rb_available_to_write(rb);
     size_t desiredLength = sizeof(size_t) + length;
     size_t actualLength = desiredLength <= maxLength ? desiredLength : maxLength;
@@ -906,6 +950,7 @@ ssize_t rb_send(ring_buffer* rb, int socket, const void *buffer, size_t length, 
     return actualLength;
 }
 
+// This should be called from a non-realtime thread
 void rb_dosend(ring_buffer* rb)
 {
     int socket;
