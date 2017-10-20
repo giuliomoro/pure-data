@@ -91,6 +91,7 @@ typedef struct _fdpoll
     t_fdpollfn fdp_fn;
     void *fdp_ptr;
     ring_buffer* rb;
+    int data_available;
 } t_fdpoll;
 
 #define INBUFSIZE 4096
@@ -131,6 +132,7 @@ struct _instanceinter
     int i_guisize;
     int i_waitingforping;
     int i_bytessincelastping;
+    int i_data_available;
 
 #ifdef _WIN32
     LARGE_INTEGER i_inittime;
@@ -152,7 +154,7 @@ void* poll_thread_loop(void* arg)
 	{
 		poll_fds();
 		rb_dosend(sys_guibuf_rb);
-		usleep(10000);
+		usleep(3000);
 	}
 }
 
@@ -217,6 +219,17 @@ double sys_getrealtime(void)
 
 extern int sys_nosleep;
 
+typedef struct _netsend
+{
+    t_object x_obj;
+    t_outlet *x_msgout;
+    t_outlet *x_connectout;
+    int x_sockfd;
+    int x_protocol;
+    int x_bin;
+} t_netsend;
+
+void netsend_readbin(t_netsend *x, ring_buffer* rb, int fd);
 static void poll_fds()
 {
     const unsigned int maxRecv = RB_SIZE; // an arbitrary limit per call to recv, which will be further narrowed down below on a per-socket basis
@@ -227,6 +240,17 @@ static void poll_fds()
     t_fdpoll *fp;
     timout.tv_sec = 0;
     timout.tv_usec = 0;
+    if(pd_this->pd_inter->i_data_available)
+    {
+        // silly "locking" mechanism to ensure we do not mess around with the fds 
+        // while they may be re-allocated as a consequence of an incoming packet
+        // (typically: when we accept() a new TCP connection.
+        // Of course this is not enough, because fdpoll manipulation could happen 
+        // at any time
+        printf("Locked\n");
+        return;
+    }
+    t_fdpoll* sys_fdpoll = pd_this->pd_inter->i_fdpoll;
     if (1)
     {
         fd_set readset, writeset, exceptset;
@@ -253,18 +277,18 @@ static void poll_fds()
         for (i = 0; i < pd_this->pd_inter->i_nfdpoll; i++)
             if (FD_ISSET(pd_this->pd_inter->i_fdpoll[i].fdp_fd, &readset))
 		{
-			// let's store it locally to avoid changing too much of the code below
-			t_fdpoll* sys_fdpoll = pd_this->pd_inter->i_fdpoll;
             int fd = sys_fdpoll[i].fdp_fd;
             ring_buffer* rb = sys_fdpoll[i].rb;
             unsigned int size = rb_available_to_write(rb);
             size = size > maxRecv ? maxRecv : size;
-            //if callback == socketreceiver_read, do this:
-            if ((void*)*sys_fdpoll[i].fdp_fn != (void*)socketreceiver_read)
+            if ((void*)*sys_fdpoll[i].fdp_fn != (void*)socketreceiver_read &&
+                (void*)*sys_fdpoll[i].fdp_fn != (void*)netsend_readbin)
             {
-            //otherwise call the actual callback NOW
-                printf("Callback is not socketreceiver %d\n",  size);
-                (*sys_fdpoll[i].fdp_fn)(sys_fdpoll[i].fdp_ptr, sys_fdpoll[i].rb, sys_fdpoll[i].fdp_fd);
+                //if the callback is not thread-safe, schedule it to be called from the audio thread
+                // printf("scheduling callback for %d\n", i);
+                pd_this->pd_inter->i_data_available = 1;
+                sys_fdpoll[i].data_available = 1;
+                break; // This is our way of being thread-safe, combined with the "locking" mechansim above
             }
             else
             {
@@ -291,7 +315,16 @@ int sys_domicrosleep(int microsec, int pollem)
     {
         for (i = 0; i < pd_this->pd_inter->i_nfdpoll; i++)
         {
-            if(rb_available_to_read(pd_this->pd_inter->i_fdpoll[i].rb) > 0)
+            if(pd_this->pd_inter->i_fdpoll[i].data_available)
+            {
+                // printf("running callback for %d\n", i);
+                // call a callback from within the audio thread
+                (*pd_this->pd_inter->i_fdpoll[i].fdp_fn)(pd_this->pd_inter->i_fdpoll[i].fdp_ptr, pd_this->pd_inter->i_fdpoll[i].rb, pd_this->pd_inter->i_fdpoll[i].fdp_fd);
+                pd_this->pd_inter->i_fdpoll[i].data_available = 0;
+                continue;
+            }
+            int ret = rb_available_to_read(pd_this->pd_inter->i_fdpoll[i].rb);
+            if(ret > 0)
             {
 #ifdef THREAD_LOCKING
             sys_lock();
@@ -306,6 +339,8 @@ int sys_domicrosleep(int microsec, int pollem)
             didsomething = 1;
 	    }
         }
+        // "unlock" the other thread: we processed all the data_available (if any)
+        pd_this->pd_inter->i_data_available = 0;
         return (didsomething);
     }
     else
@@ -486,7 +521,6 @@ void sys_sockerror(char *s)
 #endif
     post("%s: %s (%d)\n", s, strerror(err), err);
 }
-
 void sys_addpollfn(int fd, t_fdpollfn fn, void *ptr)
 {
     int nfd, size;
@@ -507,6 +541,7 @@ void sys_addpollfn(int fd, t_fdpollfn fn, void *ptr)
     fp->fdp_fn = fn;
     fp->fdp_ptr = ptr;
     fp->rb = rb_create(RB_SIZE);
+    fp->data_available = 0;
     printf("Created rb for fd %d: %p\n", fp->fdp_fd, fp->rb);
     pd_this->pd_inter->i_nfdpoll = nfd + 1;
     if (fd >= pd_this->pd_inter->i_maxfd)
@@ -1382,7 +1417,6 @@ static int sys_do_startgui(const char *libdir)
     }
 
     pd_this->pd_inter->i_socketreceiver = socketreceiver_new(0, 0, 0, 0);
-    printf("Adding pollfn for socketreceiver_read (%d)\n", pd_this->pd_inter->i_socketreceiver);
     sys_addpollfn(pd_this->pd_inter->i_guisock,
         (t_fdpollfn)socketreceiver_read,
             pd_this->pd_inter->i_socketreceiver);
