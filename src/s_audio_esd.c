@@ -65,7 +65,7 @@ void esd_close_audio( void)
 }
 
 
-#define DEFDACBLKSIZE 8
+#define DEFDACBLKSIZE 64
 #define MAXCHANS 2
 
 static short buf[DEFDACBLKSIZE*MAXCHANS];

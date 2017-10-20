@@ -60,7 +60,7 @@ EXTERN void sys_register_loader(loader_t loader);
 #define SENDDACS_YES 1
 #define SENDDACS_SLEPT 2
 
-#define DEFDACBLKSIZE 8
+#define DEFDACBLKSIZE 16
 //extern int sys_schedblocksize;  /* audio block size for scheduler */
 extern int sys_hipriority;      /* real-time flag, true if priority boosted */
 extern int sys_schedadvance;
