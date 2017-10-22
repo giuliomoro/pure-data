@@ -9,7 +9,7 @@ COMPILER_SPECIFIC_FLAGS = -ffast-math -fsingle-precision-constant
 #COMPILER_SPECIFIC_FLAGS = 
 
 # Assume Linux
-SOLIB_EXT = so
+SOLIB_EXT = so.1
 PDNATIVE_PLATFORM = linux
 PDNATIVE_ARCH = $(shell $(CC) -dumpmachine | sed -e 's,-.*,,' -e 's,i[3456]86,x86,' -e 's,amd64,x86_64,')
 PLATFORM_CFLAGS = -DHAVE_LIBDL -Wno-int-to-pointer-cast \
@@ -28,7 +28,7 @@ XENO_LIB_PATH ?= $(XENO_PATH)/lib/
 U = /Users/Giulio/arm/usr
 
 #LD_XENO_WRAP_FLAGS := -Wl$(shell for a in `grep -RhIo "\w*pthread_\w*" pure-data/src pure-data/extra libpd_wrapper | grep -v "_t" | grep -v pthread_join | sort -u`; do printf ",-wrap,$$a"; done) -lpthread_rt -L$(XENO_LIB_PATH)
-LDFLAGS = -lm -ldl -Wl,-Bsymbolic $(XENO_POSIX_LIBS) -Wl,-soname,libpd.so -shared
+LDFLAGS = -lm -ldl -Wl,-Bsymbolic $(XENO_POSIX_LIBS) -Wl,-soname,libpd.$(SOLIB_EXT) -shared
 CPP_LDFLAGS = $(LDFLAGS)
 
 PDNATIVE_SOLIB_EXT ?= $(SOLIB_EXT)
@@ -152,16 +152,19 @@ install:
 	mkdir -p $(prefix)/include/libpd/util
 	install libpd_wrapper/util/z_print_util.h $(prefix)/include/libpd/util
 	install libpd_wrapper/util/z_queued.h $(prefix)/include/libpd/util
-	install $(LIBPD) $(prefix)/lib
+	install libpd_wrapper/util/ringbuffer.h $(prefix)/include/libpd/
+	install $(LIBPD) $(prefix)/lib/ && cd $(prefix)/lib && rm -rf libpd.so && ln -s `basename $(LIBPD)` libpd.so
+	ldconfig || true
 	if [ -e $(PDCPP) ]; then \
 		install cpp/*.hpp $(prefix)/include/libpd; \
 		install $(PDCPP) $(prefix)/lib; \
 	fi
 
 copy: libpd
-	rsync libs/libpd.so root@192.168.7.2:/usr/lib/
+	rsync $(LIBPD) root@192.168.7.2:/usr/local/lib/
 
 uninstall:
 	rm -rf $(prefix)/include/libpd
+	rm -f $(prefix)/lib/libpd.so # this should be the symlink
 	rm -f $(prefix)/lib/`basename $(LIBPD)`
 	rm -f $(prefix)/lib/`basename $(PDCPP)`
