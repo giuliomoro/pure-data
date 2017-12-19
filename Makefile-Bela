@@ -5,6 +5,7 @@ CC?=arm-linux-gnueabihf-gcc
 CROSS_COMPILE_FLAGS= -march=armv7-a
 COMPILER_SPECIFIC_FLAGS = -ffast-math -fsingle-precision-constant
 #CC = clang-mp-3.8
+#U = /Users/Giulio/arm/usr
 #CROSS_COMPILE_FLAGS = -target armv7l-unknown-linux-gnueabihf -I$U/include/c++/4.9 -I$U/include/arm-linux-gnueabihf/c++/4.9 -I$U/include/c++/4.9/backward -I$U/local/include -I$U/local/lib/clang/3.8.0/include -I$U/include/arm-linux-gnueabihf -I$U/include -c
 #COMPILER_SPECIFIC_FLAGS = 
 
@@ -25,7 +26,6 @@ XENO_POSIX_CFLAGS:=`/usr/xenomai/bin/xeno-config --skin=posix --cflags`
 #XENO_POSIX_LIBS:=-Wl,@$(XENO_PATH)/lib/posix.wrappers -L$(XENO_PATH)/lib `/usr/xenomai/bin/xeno-config --native --ldflags`
 XENO_POSIX_LIBS:=$(shell /usr/xenomai/bin/xeno-config --skin=posix --ldflags --no-auto-init 2>/dev/null || /usr/xenomai/bin/xeno-config --skin=posix --ldflags)
 XENO_LIB_PATH ?= $(XENO_PATH)/lib/
-U = /Users/Giulio/arm/usr
 
 #LD_XENO_WRAP_FLAGS := -Wl$(shell for a in `grep -RhIo "\w*pthread_\w*" pure-data/src pure-data/extra libpd_wrapper | grep -v "_t" | grep -v pthread_join | sort -u`; do printf ",-wrap,$$a"; done) -lpthread_rt -L$(XENO_LIB_PATH)
 LDFLAGS = -lm -ldl -Wl,-Bsymbolic $(XENO_POSIX_LIBS) -Wl,-soname,libpd.$(SOLIB_EXT) -shared
