@@ -169,9 +169,7 @@ EXTERN void sys_microsleep(int microsec);
 EXTERN void sys_init_fdpoll(void);
 #ifdef PD_THREADED_IO
 void sys_doio(
-#ifdef PDINSTANCE
-    t_pdinstance* pd_that;
-#endif /* PDINSTANCE */
+    t_pdinstance* pd_that
 );
 EXTERN void sys_dontmanageio(int status);
 #endif

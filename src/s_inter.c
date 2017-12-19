@@ -300,14 +300,9 @@ static void poll_fds(t_pdinstance* pd_that)
 }
 
 void sys_doio(
-#ifdef PDINSTANCE
-    t_pdinstance* pd_that;
-#endif /* PDINSTANCE */
+    t_pdinstance* pd_that
 )
 {
-#if !defined(PDINSTANCE)
-    t_pdinstance* pd_that = pd_this;
-#endif /* !defined(PDINSTANCE) */
     poll_fds(pd_that);
     rb_dosend(pd_that->pd_inter->i_guibuf_rb);
     rb_dosend(pd_that->pd_inter->i_rbsend);
