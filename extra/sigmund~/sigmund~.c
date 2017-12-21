@@ -9,6 +9,13 @@
     implement block ("-b") mode
 */
 
+#define THREADED_SIGMUND
+#ifdef THREADED_SIGMUND
+#include <sched.h>
+#include <pthread.h>
+#include <ringbuffer.h>
+#include <unistd.h>
+#endif /* THREADED_SIGMUND */
 #ifdef PD
 #include "m_pd.h"
 #endif
@@ -246,6 +253,128 @@ static void sigmund_remask(int maxbin, int bestindex, t_float powmask,
 #define PEAKMASKFACTOR 1.
 #define PEAKTHRESHFACTOR 0.6
 
+#ifdef THREADED_SIGMUND
+static int count = 0;
+#endif /* THREADED_SIGMUND */
+#ifdef THREADED_SIGMUND
+static void setup_sched_parameters(pthread_attr_t *attr, int prio)
+{
+    struct sched_param p;
+    int ret;
+    ret = pthread_attr_setinheritsched(attr, PTHREAD_EXPLICIT_SCHED);
+    if (ret)
+    {
+        fprintf(stderr, "pthread_attr_setinheritsched()");
+        return ret;
+    }
+    ret = pthread_attr_setschedpolicy(attr, prio ? SCHED_FIFO : SCHED_OTHER);
+    if (ret)
+    {
+        fprintf(stderr, "pthread_attr_setschedpolicy()");
+        return ret;
+    }
+
+    p.sched_priority = prio;
+    ret = pthread_attr_setschedparam(attr, &p);
+    if (ret)
+    {
+        fprintf(stderr, "pthread_attr_setschedparam()");
+        return ret;
+    }
+}
+
+static int set_thread_stack_and_priority(pthread_attr_t *attr, int stackSize, int prio)
+{
+    if(pthread_attr_setdetachstate(attr, PTHREAD_CREATE_JOINABLE))
+    {
+        fprintf(stderr, "Error: unable to set detachstate\n");
+        return -1;
+    }
+    if(stackSize <= 0)
+    {
+        stackSize = 65536;
+    }
+    if(pthread_attr_setstacksize(attr, stackSize))
+    {
+        fprintf(stderr, "Error: unable to set stack size to %d\n", stackSize);
+        return -1;
+    }
+    setup_sched_parameters(attr, prio);
+    return 0;
+}
+static int create_and_start_thread(pthread_t* task, const char* taskName, int priority, int stackSize, void*(*callback)(void*), void* arg)
+{
+    int ret;
+    pthread_attr_t attr;
+    if(pthread_attr_init(&attr))
+    {
+        fprintf(stderr, "Error: unable to init thread attributes\n");
+        return -1;
+    }
+    if(ret = set_thread_stack_and_priority(&attr, stackSize, priority))
+    {
+        return ret;
+    }
+    if(ret = pthread_create(task, &attr, callback, arg))
+    {
+        return ret;
+    }
+    pthread_setname_np(*task, taskName);
+    // check that effective parameters match the ones we requested
+    pthread_attr_t actualAttr;
+    pthread_getattr_np(*task, &actualAttr);
+    size_t stk;
+    pthread_attr_getstacksize(&actualAttr, &stk);
+    printf("measured stack: %d, requested stack: %d\n", stk, stackSize);
+    pthread_attr_destroy(&attr);
+    return 0;
+}
+struct t_outletrb_float_msg {
+    t_outlet* outlet;
+    t_float f;
+};
+void outletrb_floatprocess(ring_buffer* rb)
+{
+    while(rb_available_to_read(rb) > sizeof(struct t_outletrb_float_msg))
+    {
+        struct t_outletrb_float_msg msg;
+        rb_read_from_buffer(rb, (char*)&msg, sizeof(msg));
+        t_outlet* x = msg.outlet;
+        t_float f = msg.f;
+        outlet_float(x, f);
+    }
+}
+void outletrb_float(ring_buffer* rb, t_outlet *x, t_float f)
+{
+    struct t_outletrb_float_msg msg;
+    msg.outlet = x;
+    msg.f = f;
+    rb_write_to_buffer(rb, 1, (char*)&msg, sizeof(msg));
+}
+struct t_outletrb_list_msg {
+    t_outlet* outlet;
+    t_symbol* s;
+    int argc;
+    t_atom* argv;
+}
+void outletrb_listprocess(ring_buffer* rb)
+{
+    //TODO: retrieve data from rb and send to outlet_list();
+
+}
+void outletrb_list(ring_buffer* rb, t_outlet *x, t_symbol *s, int argc, t_atom *argv)
+{
+    struct t_outletrb_list_msg msg;
+    msg.outlet = x;
+    msg.s = s;
+    msg.argc = argc;
+    msg.argv = argv;
+    
+    // TODO: copy all needed memory into rb
+}
+#endif /* THREADED_SIGMUND */
+
+// if THREADED_SIGMUND is defined, this runs in a worker thread
 static void sigmund_getrawpeaks(int npts, t_float *insamps,
     int npeak, t_peak *peakv, int *nfound, t_float *power, t_float srate, int loud,
     t_float hifreq)
@@ -853,10 +982,42 @@ typedef struct _sigmund
     t_notefinder x_notefinder;  /* note parsing state */
     t_peak *x_trackv;           /* peak tracking state */
     int x_ntrack;               /* number of peaks tracked */
+#ifdef THREADED_SIGMUND
+    pthread_t x_doitthread;
+    ring_buffer* x_outletrb_float;
+    ring_buffer* x_outletrb_list;
+    volatile unsigned int x_shoulddoit;
+    volatile unsigned int x_shouldstop:1;
+#endif /* THREADED_SIGMUND */
     unsigned int x_dopitch:1;   /* which things to calculate */
     unsigned int x_donote:1;
     unsigned int x_dotracks:1;
 } t_sigmund;
+
+#ifdef THREADED_SIGMUND
+void sigmund_threadwaitfordata(t_sigmund* x)
+{
+    while(x->x_shoulddoit == 0 && !x->x_shouldstop){
+        usleep(1000);
+    }
+}
+static int sigmund_trylock(t_sigmund* x)
+{
+    return 0;
+}
+static int sigmund_lock(t_sigmund* x)
+{
+    return 0;
+}
+static int sigmund_unlock(t_sigmund* x)
+{
+    return 0;
+}
+static void sigmund_scheduledoit(t_sigmund* x)
+{
+        ++x->x_shoulddoit;
+}
+#endif /* THREADED_SIGMUND */
 
 static void sigmund_preinit(t_sigmund *x)
 {
@@ -978,6 +1139,7 @@ static void sigmund_minpower(t_sigmund *x, t_floatarg f)
     x->x_minpower = f;
 }
 
+// if THREADED_SIGMUND is defined, this runs in the worker thread
 static void sigmund_doit(t_sigmund *x, int npts, t_float *arraypoints,
     int loud, t_float srate)
 {
@@ -1002,14 +1164,26 @@ static void sigmund_doit(t_sigmund *x, int npts, t_float *arraypoints,
         switch (v->v_what)
         {
         case OUT_PITCH:
+#ifdef THREADED_SIGMUND
+            outletrb_float(x->x_outletrb_float, v->v_outlet, sigmund_ftom(freq));
+#else /* THREADED_SIGMUND */
             outlet_float(v->v_outlet, sigmund_ftom(freq));
+#endif /* THREADED_SIGMUND */
             break;
         case OUT_ENV:
+#ifdef THREADED_SIGMUND
+            outletrb_float(x->x_outletrb_float, v->v_outlet, sigmund_powtodb(power));
+#else /* THREADED_SIGMUND */
             outlet_float(v->v_outlet, sigmund_powtodb(power));
+#endif /* THREADED_SIGMUND */
             break;
         case OUT_NOTE:
             if (note > 0)
+#ifdef THREADED_SIGMUND
+                outletrb_float(x->x_outletrb_float, v->v_outlet, sigmund_ftom(note));
+#else /* THREADED_SIGMUND */
                 outlet_float(v->v_outlet, sigmund_ftom(note));
+#endif /* THREADED_SIGMUND */
             break;
         case OUT_PEAKS:
             for (i = 0; i < nfound; i++)
@@ -1020,7 +1194,11 @@ static void sigmund_doit(t_sigmund *x, int npts, t_float *arraypoints,
                 SETFLOAT(at+2, 2*peakv[i].p_amp);
                 SETFLOAT(at+3, 2*peakv[i].p_ampreal);
                 SETFLOAT(at+4, 2*peakv[i].p_ampimag);
+#ifdef THREADED_SIGMUND
+                outletrb_list(x->x_outletrb_list, v->v_outlet, 0, 5, at);   
+#else /* THREADED_SIGMUND */
                 outlet_list(v->v_outlet, 0, 5, at);   
+#endif /* THREADED_SIGMUND */
             }
             break;
         case OUT_TRACKS:
@@ -1077,6 +1255,12 @@ static void sigmund_free(t_sigmund *x)
     if (x->x_trackv)
         freebytes(x->x_trackv, x->x_ntrack * sizeof(*x->x_trackv));
     clock_free(x->x_clock);
+#ifdef THREADED_SIGMUND
+    x->x_shouldstop = 1;
+    void* value_ptr;
+    pthread_join(x->x_doitthread, &value_ptr);
+    printf("sigmund did it %d times (%d)\n", *(int*)value_ptr, count);
+#endif /* THREADED_SIGMUND */
 }
 
 #endif /* PD or MSP */
@@ -1096,11 +1280,30 @@ static void sigmund_stabletime(t_sigmund *x, t_floatarg f);
 static void sigmund_growth(t_sigmund *x, t_floatarg f);
 static void sigmund_minpower(t_sigmund *x, t_floatarg f);
 
+#ifdef THREADED_SIGMUND
+static void* sigmund_doit_loop(void* arg){
+    t_sigmund* x = (t_sigmund*)arg;
+    while(!x->x_shouldstop){
+        sigmund_threadwaitfordata(x);
+        if(x->x_shoulddoit > 1)
+            printf("sigmund skipped: %d computations\n", x->x_shoulddoit - 1);
+        x->x_shoulddoit = 0;
+        sigmund_doit(x, x->x_npts, x->x_inbuf, x->x_loud, x->x_sr);
+        ++count;
+    }
+    pthread_exit(&count);
+}
+#endif /* THREADED_SIGMUND */
+
 static void sigmund_tick(t_sigmund *x)
 {
     if (x->x_infill == x->x_npts)
     {
+#ifdef THREADED_SIGMUND
+        sigmund_scheduledoit(x);
+#else  /* THREADED_SIGMUND */
         sigmund_doit(x, x->x_npts, x->x_inbuf, x->x_loud, x->x_sr);
+#endif /* THREADED_SIGMUND */
         if (x->x_hop >= x->x_npts)
         {
             x->x_infill = 0;
@@ -1115,6 +1318,10 @@ static void sigmund_tick(t_sigmund *x)
         if (x->x_loud)
             x->x_loud--;
     }
+#ifdef THREADED_SIGMUND
+    outletrb_floatprocess(x->x_outletrb_float);
+    outletrb_listprocess(x->x_outletrb_list);
+#endif /* THREADED_SIGMUND */
 }
 
 static t_int *sigmund_perform(t_int *w)
@@ -1294,6 +1501,23 @@ static void *sigmund_new(t_symbol *s, int argc, t_atom *argv)
     sigmund_npts(x, x->x_npts);
     notefinder_init(&x->x_notefinder);
     sigmund_clear(x);
+#ifdef THREADED_SIGMUND
+    x->x_outletrb_float = rb_create(16384);
+    x->x_outletrb_list = rb_create(16384);
+    // make sure stacksize is enough to contain the following:
+    // t_peak *peakv = (t_peak *)alloca(sizeof(t_peak) * x->x_npeak);
+    // t_float *bigbuf = alloca(sizeof (t_float ) * (2*NEGBINS + 6*npts));
+    char taskName[] = "sigmund~-worker";
+    int priority = 50;
+    int stackSize = 65536 * 8;
+    if(create_and_start_thread(&x->x_doitthread,
+                taskName, priority, stackSize,
+                sigmund_doit_loop, (void*)x))
+    {
+         fprintf(stderr, "Unable to create sigmund~'s worker thread\n");
+         return NULL;
+    }
+#endif /* THREADED_SIGMUND */
     return (x);
 }
 
