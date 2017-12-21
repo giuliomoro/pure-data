@@ -10,9 +10,12 @@
 */
 
 #define THREADED_SIGMUND
+#undef THREADED_DEBUG
+
 #ifdef THREADED_SIGMUND
-#include <sched.h>
+#define _GNU_SOURCE
 #include <pthread.h>
+#include <sched.h>
 #include <ringbuffer.h>
 #include <unistd.h>
 #endif /* THREADED_SIGMUND */
@@ -257,7 +260,7 @@ static void sigmund_remask(int maxbin, int bestindex, t_float powmask,
 static int count = 0;
 #endif /* THREADED_SIGMUND */
 #ifdef THREADED_SIGMUND
-static void setup_sched_parameters(pthread_attr_t *attr, int prio)
+static int setup_sched_parameters(pthread_attr_t *attr, int prio)
 {
     struct sched_param p;
     int ret;
@@ -281,6 +284,7 @@ static void setup_sched_parameters(pthread_attr_t *attr, int prio)
         fprintf(stderr, "pthread_attr_setschedparam()");
         return ret;
     }
+    return 0;
 }
 
 static int set_thread_stack_and_priority(pthread_attr_t *attr, int stackSize, int prio)
@@ -299,7 +303,11 @@ static int set_thread_stack_and_priority(pthread_attr_t *attr, int stackSize, in
         fprintf(stderr, "Error: unable to set stack size to %d\n", stackSize);
         return -1;
     }
-    setup_sched_parameters(attr, prio);
+    if(setup_sched_parameters(attr, prio))
+    {
+        fprintf(stderr, "Error: unable to set schedparameters\n");
+        return -1;
+    }
     return 0;
 }
 static int create_and_start_thread(pthread_t* task, const char* taskName, int priority, int stackSize, void*(*callback)(void*), void* arg)
@@ -311,11 +319,11 @@ static int create_and_start_thread(pthread_t* task, const char* taskName, int pr
         fprintf(stderr, "Error: unable to init thread attributes\n");
         return -1;
     }
-    if(ret = set_thread_stack_and_priority(&attr, stackSize, priority))
+    if((ret = set_thread_stack_and_priority(&attr, stackSize, priority)))
     {
         return ret;
     }
-    if(ret = pthread_create(task, &attr, callback, arg))
+    if((ret = pthread_create(task, &attr, callback, arg)))
     {
         return ret;
     }
@@ -353,24 +361,172 @@ void outletrb_float(ring_buffer* rb, t_outlet *x, t_float f)
 }
 struct t_outletrb_list_msg {
     t_outlet* outlet;
-    t_symbol* s;
     int argc;
-    t_atom* argv;
-}
+    unsigned int symbollen;
+    unsigned int payloadlen;
+};
 void outletrb_listprocess(ring_buffer* rb)
 {
     //TODO: retrieve data from rb and send to outlet_list();
+    int available;
+    while((available = rb_available_to_read(rb)) > 0)
+    {
+        struct t_outletrb_list_msg msg;
+        if(available < sizeof(msg))
+        {
+            fprintf(stderr, "unexpected length in the buffer: %d\n", available);
+            //TODO: drain
+        }
+        //printf("Available to read %d\n", ret);
+        rb_read_from_buffer(rb, (char*)&msg, sizeof(msg));
+        available = rb_available_to_read(rb);
+        if(available < msg.payloadlen)
+        {
+            fprintf(stderr, "unexpected length in the buffer: %d (expecting %d payload)\n", available, msg.payloadlen);
+            //TODO: drain
+        }
+#ifdef THREADED_DEBUG
+        printf("vvvv Read %d\n", msg.payloadlen);
+#endif /* THREADED_DEBUG */
+        char buf[1000];
+        rb_read_from_buffer(rb, buf, msg.payloadlen);
+        char* bp = buf;
 
+        // in the payload there are (string-encoded)
+        // 0 or 1 symbols, followed by an arbitrary 
+        // number of atoms.
+        t_outlet* outlet = msg.outlet;
+        t_symbol* s;
+        t_symbol ss;
+        if(msg.symbollen)
+        {
+            // there is one symbol at the beginning of the payload
+            ss.s_thing = NULL;
+            ss.s_next = NULL;
+            ss.s_name = bp;
+            s = &ss;
+            if(strlen(ss.s_name) != msg.symbollen)
+            {
+                fprintf(stderr, "Unexpected length of s_name: %d %d\n", strlen(ss.s_name), msg.symbollen);
+            //TODO: drain
+            }
+            bp += msg.symbollen + 1;
+        } else {
+            // there is no symbol
+            s = NULL;
+        }
+
+        t_atom *argv = (t_atom*)bp;
+        bp += sizeof(argv[0]) * msg.argc;
+        int n;
+        for(n = 0; n < msg.argc; ++n)
+        {
+            t_atom* a = &argv[n];
+            switch(a->a_type)
+            {
+            case A_SEMI:
+            case A_COMMA:
+            case A_POINTER:
+            case A_DOLLAR:
+            case A_FLOAT:
+                // in these cases, the content is already in the raw atom,
+                // so there is no need to copy anyhthing else
+                break;
+            case A_DOLLSYM:
+            case A_SYMBOL:
+                // if it is a symbol or dollsym
+                // then bp is a pointer to the null-terminated string
+                // representing s_name
+                a->a_w.w_symbol->s_name = bp;
+                bp += strlen(bp) + 1; // + 1 to include terminating \0
+                break;
+            default:
+                bug("atom_string");
+            }
+            if(bp > buf + msg.payloadlen)
+            {
+                fprintf(stderr, "Unexpectedly got to the end of bp: %p %p\n", bp, buf + msg.payloadlen);
+                break;
+            }
+#ifdef THREADED_DEBUG
+            // print the received atom
+            unsigned int strsize = 100;
+            char str[strsize];
+            atom_string(a, str, strsize);
+            printf("r[%d]: %s\n", n, str);
+#endif /* THREADED_DEBUG */
+        }
+        if(bp != buf + msg.payloadlen)
+        {
+            fprintf(stderr, "Unexpectedly did not get to the end of bp: %p %p\n", bp, buf + msg.payloadlen);
+        }
+        
+        outlet_list(outlet, s, msg.argc, argv);
+    }
 }
 void outletrb_list(ring_buffer* rb, t_outlet *x, t_symbol *s, int argc, t_atom *argv)
 {
+    int n;
+    unsigned int bufsize = 1000;
+    char buf[bufsize];
+    char* bp = buf;
+    // copy the string from the symbol into buf
+    unsigned int symbollen;
+    if(s)
+    {
+        strncpy(bp, s->s_name, bufsize - (bp - buf));
+        symbollen = strlen(bp);
+        bp += symbollen + 1;
+    } else {
+        symbollen = 0;
+    }
+
+    // first thing, we put in bp the raw atoms from argv
+    int rawatomslen = sizeof(argv[0]) * argc;
+    memcpy(bp, argv, rawatomslen);
+    bp += rawatomslen;
+    // then for each atom we copy the content in the
+    // appropriate format
+    for(n = 0; n < argc; ++n)
+    {
+        t_atom* a  = argv + n;
+#ifdef THREADED_DEBUG
+        char b[100];
+        atom_string(a, b, bufsize - (bp - buf));
+        printf("w[%d]: %s\n", n, b);
+#endif /* THREADED_DEBUG */
+        switch(a->a_type)
+        {
+        case A_SEMI:
+        case A_COMMA:
+        case A_POINTER:
+        case A_DOLLAR:
+        case A_FLOAT:
+            // in these cases, the content is already in the raw atom,
+            // so there is no need to copy anyhthing else
+            break;
+        case A_DOLLSYM:
+        case A_SYMBOL:
+            // if it is a symbol or dollsym
+            // add the actual null-terminated string
+            strcpy(bp, a->a_w.w_symbol->s_name);
+            bp += strlen(bp) + 1; // + 1 to include termination \0
+            break;
+        default:
+            bug("atom_string");
+        
+        }
+    }
+    unsigned int actuallen = bp - buf;
     struct t_outletrb_list_msg msg;
     msg.outlet = x;
-    msg.s = s;
     msg.argc = argc;
-    msg.argv = argv;
-    
-    // TODO: copy all needed memory into rb
+    msg.payloadlen = actuallen;
+    msg.symbollen = symbollen;
+    rb_write_to_buffer(rb, 2, (char*)&msg, sizeof(msg), buf, actuallen);
+#ifdef THREADED_DEBUG
+    printf("^^^^ Written payload: %d\n", actuallen);
+#endif /* THREADED_DEBUG */
 }
 #endif /* THREADED_SIGMUND */
 
