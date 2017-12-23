@@ -12,16 +12,20 @@
 #define THREADED_SIGMUND
 #undef THREADED_DEBUG
 
+#if !defined(PD) && defined(THREADED_SIGMUND) /* PD */
+#error THREADED_SIGMUND requires PD
+#endif /* THREADED_SIGMUND*/
+
+#ifdef PD
 #ifdef THREADED_SIGMUND
 #define _GNU_SOURCE
 #include <pthread.h>
 #include <sched.h>
-#include <ringbuffer.h>
 #include <unistd.h>
+#include "threadhelpers.h"
 #endif /* THREADED_SIGMUND */
-#ifdef PD
 #include "m_pd.h"
-#endif
+#endif /* PD */
 #ifdef MSP
 #include "ext.h"
 #include "z_dsp.h"
@@ -1140,6 +1144,7 @@ typedef struct _sigmund
     int x_ntrack;               /* number of peaks tracked */
 #ifdef THREADED_SIGMUND
     pthread_t x_doitthread;
+    ring_buffer* x_inbufrb;
     ring_buffer* x_outletrb_float;
     ring_buffer* x_outletrb_list;
     volatile unsigned int x_shoulddoit;
@@ -1365,7 +1370,11 @@ static void sigmund_doit(t_sigmund *x, int npts, t_float *arraypoints,
                 SETFLOAT(at+1, x->x_trackv[i].p_freq);
                 SETFLOAT(at+2, 2*x->x_trackv[i].p_amp);
                 SETFLOAT(at+3, x->x_trackv[i].p_tmp);
+#ifdef THREADED_SIGMUND
+                //outletrb_list(x->x_outletrb_list, v->v_outlet, 0, 4, at);
+#else /* THREADED_SIGMUND */
                 outlet_list(v->v_outlet, 0, 4, at);   
+#endif /* THREADED_SIGMUND */
             }
             break;
         }
@@ -1416,6 +1425,9 @@ static void sigmund_free(t_sigmund *x)
     void* value_ptr;
     pthread_join(x->x_doitthread, &value_ptr);
     printf("sigmund did it %d times (%d)\n", *(int*)value_ptr, count);
+    rb_free(x->x_inbufrb);
+    rb_free(x->x_outletrb_float);
+    rb_free(x->x_outletrb_list);
 #endif /* THREADED_SIGMUND */
 }
 
@@ -1444,6 +1456,30 @@ static void* sigmund_doit_loop(void* arg){
         if(x->x_shoulddoit > 1)
             printf("sigmund skipped: %d computations\n", x->x_shoulddoit - 1);
         x->x_shoulddoit = 0;
+#if 1
+        int available = rb_available_to_read(x->x_inbufrb);
+        if(available < x->x_hop)
+        {
+            fprintf(stderr, "Unexpected length in x_inbuf: %d (%d)\n", available, x->x_npts);
+            //TODO: drain
+        }
+        t_float* readinto;
+        unsigned int readcount;
+        if(x->x_hop >= x->x_npts)
+        {
+            readinto = x->x_inbuf;
+        } else {
+            printf("Memmoving %d\n", (x->x_npts - x->x_hop) * sizeof(*x->x_inbuf));
+            printf("x_npts: %d, x_hop: %d\n", x->x_npts, x->x_hop);
+            // remove the memmove and get rid of the segfault upon exit
+            memmove(x->x_inbuf, x->x_inbuf + x->x_hop,
+                (x->x_npts - x->x_hop) * sizeof(*x->x_inbuf));
+            readinto = x->x_inbuf + x->x_npts - x->x_hop;
+        }
+        readcount = x->x_inbuf - readinto + x->x_npts;
+        printf("reading %d %d\n", readcount, readcount * sizeof(*readinto));
+        rb_read_from_buffer(x->x_inbufrb, (char*)readinto, readcount * sizeof(*readinto));
+#endif
         sigmund_doit(x, x->x_npts, x->x_inbuf, x->x_loud, x->x_sr);
         ++count;
     }
@@ -1457,7 +1493,7 @@ static void sigmund_tick(t_sigmund *x)
     {
 #ifdef THREADED_SIGMUND
         sigmund_scheduledoit(x);
-#else  /* THREADED_SIGMUND */
+#else /* THREADED_SIGMUND */
         sigmund_doit(x, x->x_npts, x->x_inbuf, x->x_loud, x->x_sr);
 #endif /* THREADED_SIGMUND */
         if (x->x_hop >= x->x_npts)
@@ -1467,8 +1503,13 @@ static void sigmund_tick(t_sigmund *x)
         }
         else
         {
+#ifdef THREADED_SIGMUND
+        // the overlapping windows are handled in sigmund_doit_loop
+#else /* THREADED_SIGMUND */
             memmove(x->x_inbuf, x->x_inbuf + x->x_hop,
-                (x->x_infill = x->x_npts - x->x_hop) * sizeof(*x->x_inbuf));
+                (x->x_npts - x->x_hop) * sizeof(*x->x_inbuf));
+#endif /* THREADED_SIGMUND */
+            x->x_infill = x->x_npts - x->x_hop;
             x->x_countdown = 0;
         }
         if (x->x_loud)
@@ -1492,10 +1533,19 @@ static t_int *sigmund_perform(t_int *w)
         x->x_countdown -= n;
     else if (x->x_infill != x->x_npts)
     {
+#ifdef THREADED_SIGMUND
+        int bytestowrite = n * sizeof(in[0]);
+        int availabletowrite = rb_available_to_write(x->x_inbufrb);
+        if(availabletowrite < bytestowrite)
+            fprintf(stderr, "Not enough space for writing: %d (%d) \n", bytestowrite, availabletowrite);
+
+        rb_write_to_buffer(x->x_inbufrb, 1, (char*)in, bytestowrite);
+#else /* THREADED_SIGMUND */
         int j;
         t_float *fp = x->x_inbuf + x->x_infill;
         for (j = 0; j < n; j++)
             *fp++ = *in++;
+#endif /* THREADED_SIGMUND */
         x->x_infill += n;
         if (x->x_infill == x->x_npts)
             clock_delay(x->x_clock, 0);
@@ -1658,6 +1708,7 @@ static void *sigmund_new(t_symbol *s, int argc, t_atom *argv)
     notefinder_init(&x->x_notefinder);
     sigmund_clear(x);
 #ifdef THREADED_SIGMUND
+    x->x_inbufrb = rb_create(32768);
     x->x_outletrb_float = rb_create(16384);
     x->x_outletrb_list = rb_create(16384);
     // make sure stacksize is enough to contain the following:
