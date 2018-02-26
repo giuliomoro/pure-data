@@ -85,6 +85,13 @@ typedef int socklen_t;
 #endif
 #define RB_SIZE 16384
 
+typedef struct _fdsend
+{
+    int fds_fd;
+    t_fdsendrmfn fds_fn;
+    void *fds_ptr;
+} t_fdsend;
+
 typedef struct _fdpoll
 {
     int fdp_fd;
@@ -119,8 +126,12 @@ struct _instanceinter
 {
     int i_havegui;
     ring_buffer* i_rbsend;
+    ring_buffer* i_rbrmfdrecv;
+    ring_buffer* i_rbrmfdsend;
     pthread_t i_iothread;
     int i_dontmanageio;
+    int i_nfdsend;
+    t_fdsend *i_fdsend;
     int i_nfdpoll;
     t_fdpoll *i_fdpoll;
     int i_maxfd;
@@ -146,7 +157,7 @@ struct _instanceinter
 #endif
 };
 
-void rb_dosend(ring_buffer*);
+void rb_dosend(t_pdinstance*, ring_buffer*);
 static void poll_fds();
 
 extern int sys_guisetportnumber;
@@ -220,7 +231,10 @@ typedef struct _netsend
     int x_bin;
 } t_netsend;
 
+
+
 void netsend_readbin(t_netsend *x, ring_buffer* rb, int fd);
+
 static void poll_fds(t_pdinstance* pd_that)
 {
     const unsigned int maxRecv = RB_SIZE; // an arbitrary limit per call to recv, which will be further narrowed down below on a per-socket basis
@@ -240,6 +254,19 @@ static void poll_fds(t_pdinstance* pd_that)
         // at any time
         // printf("Locked\n");
         return;
+    }
+    if(pd_that->pd_inter->i_rbrmfdrecv == NULL)
+    {
+        pd_that->pd_inter->i_rbrmfdrecv = rb_create(4096);
+    }
+    ring_buffer* rbrmfdrecv = pd_that->pd_inter->i_rbrmfdrecv;
+    if(rbrmfdrecv)
+    {
+        if(rb_available_to_read(rbrmfdrecv) > sizeof(int))
+        {
+            printf("there are some fds pending deletion, wait until we are clear\n");
+            return;
+        }
     }
     t_fdpoll* sys_fdpoll = pd_that->pd_inter->i_fdpoll;
     if (1)
@@ -265,6 +292,7 @@ static void poll_fds(t_pdinstance* pd_that)
         if(select(pd_that->pd_inter->i_maxfd+1,
                   &readset, &writeset, &exceptset, &timout) < 0)
           perror("microsleep select");
+
         for (i = 0; i < pd_that->pd_inter->i_nfdpoll; i++)
             if (FD_ISSET(pd_that->pd_inter->i_fdpoll[i].fdp_fd, &readset))
 		{
@@ -286,7 +314,8 @@ static void poll_fds(t_pdinstance* pd_that)
                 ret = recv(fd, buf, size, 0);
                 if(ret < 0)
                 {
-                    fprintf(stderr, "Error during recv: %s(%d)\n", strerror(-ret), -ret);
+                    fprintf(stderr, "Error during recv(%d, %p, %d, %d): %s(%d)\n", fd, buf, size, 0, strerror(errno), errno);
+                    rb_write_to_buffer(rbrmfdrecv, 1, &fd, sizeof(fd));
                 }
                 else
                 {
@@ -304,8 +333,8 @@ void sys_doio(
 )
 {
     poll_fds(pd_that);
-    rb_dosend(pd_that->pd_inter->i_guibuf_rb);
-    rb_dosend(pd_that->pd_inter->i_rbsend);
+    rb_dosend(pd_that, pd_that->pd_inter->i_guibuf_rb);
+    rb_dosend(pd_that, pd_that->pd_inter->i_rbsend);
 }
 void sys_startiothread();
 
@@ -318,6 +347,40 @@ int sys_domicrosleep(int microsec, int pollem)
 	{
             sys_doio(pd_this);
 	}
+        ring_buffer* rbrmfdrecv = pd_this->pd_inter->i_rbrmfdrecv;
+        if(rbrmfdrecv)
+        {
+            // fds queued for deletion, upon a failed recv() call
+            while(rb_available_to_read(rbrmfdrecv) >= sizeof(int))
+            {
+                int fd;
+                rb_read_from_buffer(rbrmfdrecv, (char*)&fd, sizeof(fd));
+                printf("Removing fd %d from recv list\n", fd);
+                sys_rmpollfn(fd);
+                sys_closesocket(fd);
+           }
+        }
+        ring_buffer* rbrmfdsend = pd_this->pd_inter->i_rbrmfdsend;
+        if(rbrmfdsend)
+        {
+            // fds queued for deletion, upon a failed send() call
+            while(rb_available_to_read(rbrmfdsend) >= sizeof(int))
+            {
+                int fd;
+                rb_read_from_buffer(rbrmfdsend, (char*)&fd, sizeof(fd));
+                printf("Removing send fd %d from send list\n", fd);
+                // find what object owns it
+                for(i = 0; i < pd_this->pd_inter->i_nfdsend; ++i)
+                {
+                    t_fdsend* fdsends = pd_this->pd_inter->i_fdsend;
+                    if(fd == fdsends[i].fds_fd)
+                    {
+                        printf("fd %d found to belong to %p, so calling %p\n", fd, fdsends[i].fds_ptr, fdsends[i].fds_fn);
+                        fdsends[i].fds_fn(fdsends[i].fds_ptr);
+                    }
+                }
+            }
+        }
         for (i = 0; i < pd_this->pd_inter->i_nfdpoll; i++)
         {
             if(pd_this->pd_inter->i_fdpoll[i].data_available)
@@ -570,6 +633,29 @@ ssize_t sys_send(int sockfd, const void *buf, size_t len, int flags)
     if(init_rbsend())
         return -1;
     return rb_send(pd_this->pd_inter->i_rbsend, sockfd, buf, len, flags);
+}
+
+// register a callback to delete an object when a send fd fails
+void sys_addsendfdrmfn(int fd, t_fdsendrmfn fn, void* ptr)
+{
+    int nfd, size;
+    t_fdsend *fs;
+    if (!pd_this->pd_inter->i_fdsend)
+    {
+        // init
+        /* create an empty FD list */
+        pd_this->pd_inter->i_fdsend = (t_fdsend *)t_getbytes(0);
+        pd_this->pd_inter->i_nfdsend= 0;
+    }
+    nfd = pd_this->pd_inter->i_nfdsend;
+    size = nfd * sizeof(t_fdsend);
+    pd_this->pd_inter->i_fdsend = (t_fdsend *)t_resizebytes(
+        pd_this->pd_inter->i_fdsend, size, size + sizeof(t_fdsend));
+    fs = pd_this->pd_inter->i_fdsend + nfd;
+    fs->fds_fd = fd;
+    fs->fds_fn = fn;
+    fs->fds_ptr = ptr;
+    pd_this->pd_inter->i_nfdsend = nfd + 1;
 }
 
 void sys_addpollfn(int fd, t_fdpollfn fn, void *ptr)
@@ -953,8 +1039,13 @@ ssize_t rb_send(ring_buffer* rb, int socket, const void *buffer, size_t length, 
 }
 
 // This should be called from a non-realtime thread
-void rb_dosend(ring_buffer* rb)
+void rb_dosend(t_pdinstance* pd_that, ring_buffer* rb)
 {
+    if(pd_that->pd_inter->i_rbrmfdsend == NULL)
+    {
+        pd_that->pd_inter->i_rbrmfdsend = rb_create(4096);
+    }
+    ring_buffer* rbrmfdsend = pd_that->pd_inter->i_rbrmfdsend;
     int socket;
     size_t length;
     char* buf;
@@ -980,9 +1071,11 @@ void rb_dosend(ring_buffer* rb)
 
     if (nwrote < 0)
     {
-        // TODO: these are probably not thread-safe
-        perror("pd-to-gui socket");
-        sys_bail(1);
+        fprintf(stderr, "failed send(%d, %p, %d, 0) call\n", socket, buf, length, 0);
+        rb_write_to_buffer(rbrmfdsend, 1, &socket, sizeof(socket));
+        // perror("pd-to-gui socket");
+        // TODO: if this was the pd-gui socket, should call sys_bail(1);
+        //sys_bail(1);
     }
 
 }

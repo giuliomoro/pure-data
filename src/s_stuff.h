@@ -190,6 +190,8 @@ EXTERN void socketreceiver_read(t_socketreceiver *x, ring_buffer* rb, int fd);
 EXTERN void sys_sockerror(char *s);
 EXTERN void sys_closesocket(int fd);
 
+typedef void (*t_fdsendrmfn)(void *ptr);
+void sys_addsendfdrmfn(int sockfd, t_fdsendrmfn, void* x);
 typedef void (*t_fdpollfn)(void *ptr, ring_buffer* rb, int fd);
 EXTERN void sys_addpollfn(int fd, t_fdpollfn fn, void *ptr);
 EXTERN void sys_rmpollfn(int fd);
