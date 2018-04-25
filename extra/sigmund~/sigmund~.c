@@ -1118,8 +1118,11 @@ typedef struct _sigmund
 #ifdef THREADED_SIGMUND
 void sigmund_threadwaitfordata(t_sigmund* x)
 {
+    struct timespec req;
+    req.tv_sec = 0;
+    req.tv_nsec = 1000000;
     while(x->x_shoulddoit == 0 && !x->x_shouldstop){
-        usleep(1000);
+        nanosleep(&req, NULL);
     }
 }
 static int sigmund_trylock(t_sigmund* x)
@@ -1422,6 +1425,9 @@ static void* sigmund_doit_loop(void* arg){
 
 static void sigmund_tick(t_sigmund *x)
 {
+    // TODO: cover the case where a new buffer is coming in before the worker thread
+    // has finished processing
+    // When runnning [sigmund~ -npeak 10 peaks] we get wrong output values.
     if (x->x_infill == x->x_npts)
     {
 #ifdef THREADED_SIGMUND
