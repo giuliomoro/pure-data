@@ -373,23 +373,23 @@ void outletrb_listprocess(ring_buffer* rb)
         if(available < sizeof(msg))
         {
             fprintf(stderr, "unexpected length in the buffer: %d\n", available);
+            return;
             //TODO: drain
         }
-        //printf("Available to read %d\n", ret);
         rb_read_from_buffer(rb, (char*)&msg, sizeof(msg));
         available = rb_available_to_read(rb);
         if(available < msg.payloadlen)
         {
             fprintf(stderr, "unexpected length in the buffer: %d (expecting %d payload)\n", available, msg.payloadlen);
+            return;
             //TODO: drain
         }
-        printf("Reading %d\n", msg.payloadlen);
         char buf[1000];
         rb_read_from_buffer(rb, buf, msg.payloadlen);
         char* bp = buf;
 
         // in the payload there are (string-encoded)
-        // 0 or 1 symbols, followed by an arbitrary 
+        // 0 or 1 symbols, followed by an argc
         // number of atoms.
         t_outlet* outlet = msg.outlet;
         t_symbol* s;
@@ -401,58 +401,96 @@ void outletrb_listprocess(ring_buffer* rb)
             ss.s_next = NULL;
             ss.s_name = bp;
             s = &ss;
-            assert(strlen(bp) == msg.symbollen);
+            if(strlen(bp) != msg.symbollen)
+            {
+
+                fprintf(stderr, "outletrb_listprocess: the length of the received symbol is different from the declared one: %d vs %d \n", strlen(bp), msg.symbollen);
+                return;
+            }
             bp += msg.symbollen + 1;
         } else {
             // there is no symbol
             s = NULL;
         }
-
         int n = 0;
+        t_atom at[msg.argc];
         while(bp < buf + msg.payloadlen)
         {
-            printf("[%d] (%d)", n, bp - buf);
-            int len = printf("%s", bp);
-            printf("_\n");
-            bp += len + 1;
+            t_float value;
+            memcpy(&value, bp, sizeof(t_float));
+            bp += sizeof(t_float);
+            SETFLOAT(at + n, (t_float)value);
+            //printf("received element[%d]: %f\n", n, value);
             ++n;
+            //printf("bp: %p, buf+msg.payloadlen: %p, paloadlen: %d\n", bp, buf+msg.payloadlen, msg.payloadlen);
         }
-        //outlet_list(outlet, s, 
+        if(n != msg.argc)
+        {
+            fprintf(stderr, "outletrb_listprocess: the length of the received list is different from the declared one: %d vs %d \n", n, msg.argc);
+            return;
+        }
+        outlet_list(outlet, s, msg.argc, at);
     }
 }
+
 void outletrb_list(ring_buffer* rb, t_outlet *x, t_symbol *s, int argc, t_atom *argv)
 {
+    // this only works if all the argv are floats
     int n;
-    unsigned int bufsize = 1000;
-    char buf[1000] = {0};
+    unsigned int symbollen;
+    if(s)
+        symbollen = strlen(s->s_name);
+    else
+        symbollen = 0;
+    // TODO: make sure the floats are aligned to a 4-byte boundary
+    unsigned int bufsize = argc * sizeof(t_float) + symbollen + 1;
+    char buf[bufsize];
     // store in buf a series of null-separated strings, each
     // representing one atom
     char* bp = buf;
     // copy the string from the symbol into buf
-    unsigned int symbollen;
     if(s)
     {
         strncpy(bp, s->s_name, bufsize - (bp - buf));
-        symbollen = strlen(bp);
         bp += symbollen + 1;
-    } else {
-        symbollen = 0;
     }
-    // convert the argc/argv into strings
+
     for(n = 0; n < argc; ++n)
     {
-        t_atom* a  = argv + n;
-        atom_string(a, bp, bufsize - (bp - buf));
-        printf("w[%d]: %s\n", n, bp);
-        bp += strlen(bp) + 1;
+        if(argv[n].a_type != A_FLOAT)
+        {
+            fprintf(stderr, "Error: outletrb_list only accepts float atoms\n");
+            return;
+        }
+        if(bp + sizeof(t_float) - buf > bufsize)
+        {
+            fprintf(stderr, "Error: outletrb_list buffer full\n");
+            return;
+        }
+        memcpy(bp, &argv[n].a_w.w_float, sizeof(t_float));
+        bp += sizeof(t_float);
     }
+    // this could maybe be used for non-float atoms?
+    // convert the argc/argv into strings
+    // for(n = 0; n < argc; ++n)
+    // {
+        // t_atom* a  = argv + n;
+        // atom_string(a, bp, bufsize - (bp - buf));
+        // printf("w[%d]: %s\n", n, bp);
+        // bp += strlen(bp) + 1;
+    // }
     unsigned int actuallen = bp - buf;
     struct t_outletrb_list_msg msg;
     msg.outlet = x;
     msg.argc = argc;
     msg.payloadlen = actuallen;
     msg.symbollen = symbollen;
-    printf("Writing payload: %d\n", actuallen);
+    //printf("Writing payload: %d, including argc %d\n", actuallen, msg.argc);
+    if(actuallen != symbollen + argc * sizeof(t_float))
+    {
+        fprintf(stderr, "outletrb_list: actuallen: %d, symbollen + argc*size: %d, thus aborting\n", actuallen, symbollen + argc*sizeof(t_float));
+        return;
+    }
     rb_write_to_buffer(rb, 2, (char*)&msg, sizeof(msg), buf, actuallen);
 }
 #endif /* THREADED_SIGMUND */
@@ -1292,7 +1330,11 @@ static void sigmund_doit(t_sigmund *x, int npts, t_float *arraypoints,
                 SETFLOAT(at+1, x->x_trackv[i].p_freq);
                 SETFLOAT(at+2, 2*x->x_trackv[i].p_amp);
                 SETFLOAT(at+3, x->x_trackv[i].p_tmp);
+#ifdef THREADED_SIGMUND
+                outletrb_list(x->x_outletrb_list, v->v_outlet, 0, 4, at);
+#else /* THREADED_SIGMUND */
                 outlet_list(v->v_outlet, 0, 4, at);   
+#endif /* THREADED_SIGMUND */
             }
             break;
         }
