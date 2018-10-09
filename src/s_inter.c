@@ -331,13 +331,11 @@ static void poll_fds(t_pdinstance* pd_that)
     free(buf);
 }
 
-void sys_doio(
-    t_pdinstance* pd_that
-)
+void sys_doio()
 {
-    poll_fds(pd_that);
-    rb_dosend(pd_that, pd_that->pd_inter->i_guibuf_rb);
-    rb_dosend(pd_that, pd_that->pd_inter->i_rbsend);
+    poll_fds(pd_this);
+    rb_dosend(pd_this, pd_this->pd_inter->i_guibuf_rb);
+    rb_dosend(pd_this, pd_this->pd_inter->i_rbsend);
 }
 void sys_startiothread();
 
