@@ -10,11 +10,13 @@ to be different but are now unified except for some fossilized names.) */
 #include "m_pd.h"
 #include "m_imp.h"
 #include "s_stuff.h"
+#include "s_utf8.h"
 #include "g_canvas.h"
 #include <string.h>
 #include "g_all_guis.h"
 
 #ifdef _MSC_VER
+#include <io.h>
 #define snprintf _snprintf
 #endif
 
@@ -196,7 +198,7 @@ void canvas_makefilename(t_canvas *x, char *file, char *result, int resultsize)
         int nleft;
         strncpy(result, dir, resultsize);
         result[resultsize-1] = 0;
-        nleft = resultsize - strlen(result) - 1;
+        nleft = resultsize - (int)strlen(result) - 1;
         if (nleft <= 0) return;
         strcat(result, "/");
         strncat(result, file, nleft);
@@ -273,15 +275,17 @@ t_outconnect *linetraverser_next(t_linetraverser *t)
     {
         int inplus = (t->tr_nin == 1 ? 1 : t->tr_nin - 1);
         int outplus = (t->tr_nout == 1 ? 1 : t->tr_nout - 1);
+        int iow = IOWIDTH * t->tr_x->gl_zoom;
+        int iom = IOMIDDLE * t->tr_x->gl_zoom;
         gobj_getrect(&t->tr_ob2->ob_g, t->tr_x,
             &t->tr_x21, &t->tr_y21, &t->tr_x22, &t->tr_y22);
         t->tr_lx1 = t->tr_x11 +
-            ((t->tr_x12 - t->tr_x11 - IOWIDTH) * t->tr_outno) /
-                outplus + IOMIDDLE;
+            ((t->tr_x12 - t->tr_x11 - iow) * t->tr_outno) /
+                outplus + iom;
         t->tr_ly1 = t->tr_y12;
         t->tr_lx2 = t->tr_x21 +
-            ((t->tr_x22 - t->tr_x21 - IOWIDTH) * t->tr_inno)/inplus +
-                IOMIDDLE;
+            ((t->tr_x22 - t->tr_x21 - iow) * t->tr_inno)/inplus +
+                iom;
         t->tr_ly2 = t->tr_y21;
     }
     else
@@ -331,20 +335,20 @@ t_canvas *canvas_new(void *dummy, t_symbol *sel, int argc, t_atom *argv)
 
     if (argc == 5)  /* toplevel: x, y, w, h, font */
     {
-        xloc = atom_getintarg(0, argc, argv);
-        yloc = atom_getintarg(1, argc, argv);
-        width = atom_getintarg(2, argc, argv);
-        height = atom_getintarg(3, argc, argv);
-        font = atom_getintarg(4, argc, argv);
+        xloc = atom_getfloatarg(0, argc, argv);
+        yloc = atom_getfloatarg(1, argc, argv);
+        width = atom_getfloatarg(2, argc, argv);
+        height = atom_getfloatarg(3, argc, argv);
+        font = atom_getfloatarg(4, argc, argv);
     }
     else if (argc == 6)  /* subwindow: x, y, w, h, name, vis */
     {
-        xloc = atom_getintarg(0, argc, argv);
-        yloc = atom_getintarg(1, argc, argv);
-        width = atom_getintarg(2, argc, argv);
-        height = atom_getintarg(3, argc, argv);
+        xloc = atom_getfloatarg(0, argc, argv);
+        yloc = atom_getfloatarg(1, argc, argv);
+        width = atom_getfloatarg(2, argc, argv);
+        height = atom_getfloatarg(3, argc, argv);
         s = atom_getsymbolarg(4, argc, argv);
-        vis = atom_getintarg(5, argc, argv);
+        vis = atom_getfloatarg(5, argc, argv);
     }
         /* (otherwise assume we're being created from the menu.) */
     if (THISGUI->i_newdirectory &&
@@ -365,10 +369,6 @@ t_canvas *canvas_new(void *dummy, t_symbol *sel, int argc, t_atom *argv)
     }
     else x->gl_env = 0;
 
-    if (yloc < GLIST_DEFCANVASYLOC)
-        yloc = GLIST_DEFCANVASYLOC;
-    if (xloc < 0)
-        xloc = 0;
     x->gl_x1 = 0;
     x->gl_y1 = 0;
     x->gl_x2 = 1;
@@ -409,15 +409,15 @@ static void canvas_coords(t_glist *x, t_symbol *s, int argc, t_atom *argv)
     x->gl_y1 = atom_getfloatarg(1, argc, argv);
     x->gl_x2 = atom_getfloatarg(2, argc, argv);
     x->gl_y2 = atom_getfloatarg(3, argc, argv);
-    x->gl_pixwidth = atom_getintarg(4, argc, argv);
-    x->gl_pixheight = atom_getintarg(5, argc, argv);
+    x->gl_pixwidth = atom_getfloatarg(4, argc, argv);
+    x->gl_pixheight = atom_getfloatarg(5, argc, argv);
     if (argc <= 7)
-        canvas_setgraph(x, atom_getintarg(6, argc, argv), 1);
+        canvas_setgraph(x, atom_getfloatarg(6, argc, argv), 1);
     else
     {
-        x->gl_xmargin = atom_getintarg(7, argc, argv);
-        x->gl_ymargin = atom_getintarg(8, argc, argv);
-        canvas_setgraph(x, atom_getintarg(6, argc, argv), 0);
+        x->gl_xmargin = atom_getfloatarg(7, argc, argv);
+        x->gl_ymargin = atom_getfloatarg(8, argc, argv);
+        canvas_setgraph(x, atom_getfloatarg(6, argc, argv), 0);
     }
 }
 
@@ -595,6 +595,11 @@ void canvas_reflecttitle(t_canvas *x)
         strcat(namebuf, ")");
     }
     else namebuf[0] = 0;
+    if (x->gl_edit)
+    {
+        strncat(namebuf, " [edit]", MAXPDSTRING);
+        namebuf[MAXPDSTRING-1] = 0;
+    }
     sys_vgui("pdtk_canvas_reflecttitle .x%lx {%s} {%s} {%s} %d\n",
         x, canvas_getdir(x)->s_name, x->gl_name->s_name, namebuf, x->gl_dirty);
 }
@@ -616,14 +621,14 @@ void canvas_dirty(t_canvas *x, t_floatarg n)
 void canvas_drawredrect(t_canvas *x, int doit)
 {
     if (doit)
-        sys_vgui(".x%lx.c create line\
-            %d %d %d %d %d %d %d %d %d %d -fill #ff8080 -tags GOP\n",
+        sys_vgui(".x%lx.c create line %d %d %d %d %d %d %d %d %d %d "
+            "-fill #ff8080 -width %d -capstyle projecting -tags GOP\n",
             glist_getcanvas(x),
             x->gl_xmargin, x->gl_ymargin,
             x->gl_xmargin + x->gl_pixwidth, x->gl_ymargin,
             x->gl_xmargin + x->gl_pixwidth, x->gl_ymargin + x->gl_pixheight,
             x->gl_xmargin, x->gl_ymargin + x->gl_pixheight,
-            x->gl_xmargin, x->gl_ymargin);
+            x->gl_xmargin, x->gl_ymargin, glist_getzoom(x));
     else sys_vgui(".x%lx.c delete GOP\n",  glist_getcanvas(x));
 }
 
@@ -895,14 +900,20 @@ void canvas_restore(t_canvas *x, t_symbol *s, int argc, t_atom *argv)
 static void canvas_loadbangabstractions(t_canvas *x)
 {
     t_gobj *y;
+    t_symbol *s = gensym("loadbang");
     for (y = x->gl_list; y; y = y->g_next)
         if (pd_class(&y->g_pd) == canvas_class)
-    {
-        if (canvas_isabstraction((t_canvas *)y))
-            canvas_loadbang((t_canvas *)y);
-        else
-            canvas_loadbangabstractions((t_canvas *)y);
-    }
+        {
+            if (canvas_isabstraction((t_canvas *)y))
+                canvas_loadbang((t_canvas *)y);
+            else
+                canvas_loadbangabstractions((t_canvas *)y);
+        }
+        else if ((pd_class(&y->g_pd) == clone_class) &&
+            zgetfn(&y->g_pd, s))
+        {
+            pd_vmess(&y->g_pd, s, "f", (t_floatarg)LB_LOAD);
+        }
 }
 
 void canvas_loadbangsubpatches(t_canvas *x)
@@ -911,19 +922,21 @@ void canvas_loadbangsubpatches(t_canvas *x)
     t_symbol *s = gensym("loadbang");
     for (y = x->gl_list; y; y = y->g_next)
         if (pd_class(&y->g_pd) == canvas_class)
-    {
-        if (!canvas_isabstraction((t_canvas *)y))
-            canvas_loadbangsubpatches((t_canvas *)y);
-    }
+        {
+            if (!canvas_isabstraction((t_canvas *)y))
+                canvas_loadbangsubpatches((t_canvas *)y);
+        }
     for (y = x->gl_list; y; y = y->g_next)
         if ((pd_class(&y->g_pd) != canvas_class) &&
+            (pd_class(&y->g_pd) != clone_class) &&
             zgetfn(&y->g_pd, s))
-                pd_vmess(&y->g_pd, s, "f", (t_floatarg)LB_LOAD);
+        {
+            pd_vmess(&y->g_pd, s, "f", (t_floatarg)LB_LOAD);
+        }
 }
 
 void canvas_loadbang(t_canvas *x)
 {
-    t_gobj *y;
     canvas_loadbangabstractions(x);
     canvas_loadbangsubpatches(x);
 }
@@ -1207,7 +1220,7 @@ void glob_dsp(void *dummy, t_symbol *s, int argc, t_atom *argv)
     int newstate;
     if (argc)
     {
-        newstate = atom_getintarg(0, argc, argv);
+        newstate = atom_getfloatarg(0, argc, argv);
         if (newstate && !THISGUI->i_dspstate)
         {
             sys_set_audio_state(1);
@@ -1248,7 +1261,6 @@ static void glist_redrawall(t_glist *gl, int action)
     int vis = glist_isvisible(gl);
     for (g = gl->gl_list; g; g = g->g_next)
     {
-        t_class *cl;
         if (vis && g->g_pd == scalar_class)
         {
             if (action == 1)
@@ -1368,7 +1380,7 @@ static void canvas_completepath(char *from, char *to, int bufsize)
     {
         to[0] = '\0';
     }
-    else
+    else if(sys_libdir)
     {   // if not absolute path, append Pd lib dir
         strncpy(to, sys_libdir->s_name, bufsize-10);
         to[bufsize-9] = '\0';
@@ -1536,10 +1548,7 @@ static int canvas_open_iter(const char *path, t_canvasopen *co)
 int canvas_open(t_canvas *x, const char *name, const char *ext,
     char *dirresult, char **nameresult, unsigned int size, int bin)
 {
-    t_namelist *nl, thislist;
     int fd = -1;
-    char listbuf[MAXPDSTRING];
-    t_canvas *y;
     t_canvasopen co;
 
         /* first check if "name" is absolute (and if so, try to open) */

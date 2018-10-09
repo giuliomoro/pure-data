@@ -335,10 +335,14 @@ proc ::pd_menus::build_window_menu {mymenu} {
 proc ::pd_menus::build_help_menu {mymenu} {
     variable accelerator
     if {$::windowingsystem ne "aqua"} {
+        # Tk creates this automatically on Mac
         $mymenu add command -label [_ "About Pd"] -command {menu_aboutpd}
     }
-    $mymenu add command -label [_ "HTML Manual..."] \
-        -command {menu_doc_open doc/1.manual index.htm}
+    if {$::windowingsystem ne "aqua" || $::tcl_version < 8.5} {
+        # TK 8.5+ on Mac creates this automatically, other platforms do not
+        $mymenu add command -label [_ "HTML Manual..."] \
+                -command {menu_manual}
+    }
     $mymenu add command -label [_ "Browser..."] -accelerator "$accelerator+B" \
         -command {menu_helpbrowser}
     $mymenu add command -label [_ "List of objects..."] \
@@ -347,7 +351,7 @@ proc ::pd_menus::build_help_menu {mymenu} {
     $mymenu add command -label [_ "puredata.info"] \
         -command {menu_openfile {http://puredata.info}}
     $mymenu add command -label [_ "Report a bug"] -command {menu_openfile \
-        {http://sourceforge.net/tracker/?func=add&group_id=55736&atid=478070}}
+        {http://bugs.puredata.info}}
 }
 
 #------------------------------------------------------------------------------#

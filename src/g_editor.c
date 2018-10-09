@@ -49,6 +49,7 @@ static void canvas_dopaste(t_canvas *x, t_binbuf *b);
 static void canvas_paste(t_canvas *x);
 static void canvas_clearline(t_canvas *x);
 static t_glist *glist_finddirty(t_glist *x);
+static void canvas_zoom(t_canvas *x, t_floatarg zoom);
 
 /* ---------------- generic widget behavior ------------------------- */
 
@@ -57,6 +58,7 @@ void gobj_getrect(t_gobj *x, t_glist *glist, int *x1, int *y1,
 {
     if (x->g_pd->c_wb && x->g_pd->c_wb->w_getrectfn)
         (*x->g_pd->c_wb->w_getrectfn)(x, glist, x1, y1, x2, y2);
+    else *x1 = *y1 = 0, *x2 = *y2 = 10;
 }
 
 void gobj_displace(t_gobj *x, t_glist *glist, int dx, int dy)
@@ -520,7 +522,6 @@ typedef struct _undo_cut
 static void *canvas_undo_set_cut(t_canvas *x, int mode)
 {
     t_undo_cut *buf;
-    t_gobj *y;
     t_linetraverser t;
     t_outconnect *oc;
     int nnotsel= glist_selectionindex(x, 0, 0);
@@ -845,7 +846,6 @@ int canvas_hitbox(t_canvas *x, t_gobj *y, int xpos, int ypos,
     int *x1p, int *y1p, int *x2p, int *y2p)
 {
     int x1, y1, x2, y2;
-    t_text *ob;
     if (!gobj_shouldvis(y, x))
         return (0);
     gobj_getrect(y, x, &x1, &y1, &x2, &y2);
@@ -940,8 +940,6 @@ void canvas_create_editor(t_glist *x)
 
 void canvas_destroy_editor(t_glist *x)
 {
-    t_gobj *y;
-    t_object *ob;
     glist_noselect(x);
     if (x->gl_editor)
     {
@@ -961,7 +959,6 @@ void canvas_map(t_canvas *x, t_floatarg f);
     the window. */
 void canvas_vis(t_canvas *x, t_floatarg f)
 {
-    char buf[30];
     int flag = (f != 0);
     if (flag)
     {
@@ -988,7 +985,7 @@ void canvas_vis(t_canvas *x, t_floatarg f)
                 (unsigned long)c);
             while (c->gl_owner) {
                 c = c->gl_owner;
-                cbuflen = strlen(cbuf);
+                cbuflen = (int)strlen(cbuf);
                 snprintf(cbuf + cbuflen,
                          MAXPDSTRING - cbuflen - 2,/* leave 2 for "\n\0" */
                          " .x%lx", (unsigned long)c);
@@ -1031,7 +1028,13 @@ void canvas_vis(t_canvas *x, t_floatarg f)
                 gobj_vis(&x->gl_gobj, gl2, 0);
             x->gl_havewindow = 0;
             if (glist_isvisible(gl2) && !gl2->gl_isdeleting)
+            {
+                 /* make sure zoom level matches parent, ie. after an open
+                   subpatch's zoom level was changed before being closed */
+                if(x->gl_zoom != gl2->gl_zoom)
+                    canvas_zoom(x, gl2->gl_zoom);
                 gobj_vis(&x->gl_gobj, gl2, 1);
+            }
         }
         else x->gl_havewindow = 0;
         canvas_updatewindowlist();
@@ -1039,7 +1042,7 @@ void canvas_vis(t_canvas *x, t_floatarg f)
 }
 
     /* set a canvas up as a graph-on-parent.  Set reasonable defaults for
-    any missing paramters and redraw things if necessary. */
+    any missing parameters and redraw things if necessary. */
 void canvas_setgraph(t_glist *x, int flag, int nogoprect)
 {
     if (!flag && glist_isgraph(x))
@@ -1092,15 +1095,15 @@ void canvas_properties(t_gobj*z, t_glist*unused)
                 0., 0.,
                 glist_isgraph(x) ,//1,
                 x->gl_x1, x->gl_y1, x->gl_x2, x->gl_y2,
-                (int)x->gl_pixwidth, (int)x->gl_pixheight,
-                (int)x->gl_xmargin, (int)x->gl_ymargin);
+                (int)x->gl_pixwidth/x->gl_zoom, (int)x->gl_pixheight/x->gl_zoom,
+                (int)x->gl_xmargin/x->gl_zoom, (int)x->gl_ymargin/x->gl_zoom);
     else sprintf(graphbuf,
             "pdtk_canvas_dialog %%s %g %g %d %g %g %g %g %d %d %d %d\n",
                 glist_dpixtodx(x, 1), -glist_dpixtody(x, 1),
                 0,
                 0., -1., 1., 1.,
-                (int)x->gl_pixwidth, (int)x->gl_pixheight,
-                (int)x->gl_xmargin, (int)x->gl_ymargin);
+                (int)x->gl_pixwidth/x->gl_zoom, (int)x->gl_pixheight/x->gl_zoom,
+                (int)x->gl_xmargin/x->gl_zoom, (int)x->gl_ymargin/x->gl_zoom);
     gfxstub_new(&x->gl_pd, x, graphbuf);
         /* if any arrays are in the graph, put out their dialogs too */
     for (y = x->gl_list; y; y = y->g_next)
@@ -1113,8 +1116,6 @@ void canvas_properties(t_gobj*z, t_glist*unused)
 static void canvas_donecanvasdialog(t_glist *x,
     t_symbol *s, int argc, t_atom *argv)
 {
-
-
     t_float xperpix, yperpix, x1, y1, x2, y2, xpix, ypix, xmargin, ymargin;
     int graphme, redraw = 0, fromgui;
 
@@ -1134,14 +1135,14 @@ static void canvas_donecanvasdialog(t_glist *x,
         perhaps we're happier with 0.  This is only checked if this is really
         being called, as intended, from the GUI.  For compatibility with old
         patches that reverse-engineered donecanvasdialog to modify patch
-        parameters, we leave the buggy behavior in wieh there's no "fromgui"
+        parameters, we leave the buggy behavior in when there's no "fromgui"
         argument supplied. */
     if (fromgui && (!(graphme & 1)))
         graphme = 0;
-    x->gl_pixwidth = xpix;
-    x->gl_pixheight = ypix;
-    x->gl_xmargin = xmargin;
-    x->gl_ymargin = ymargin;
+    x->gl_pixwidth = xpix * x->gl_zoom;
+    x->gl_pixheight = ypix * x->gl_zoom;
+    x->gl_xmargin = xmargin * x->gl_zoom;
+    x->gl_ymargin = ymargin * x->gl_zoom;
 
     yperpix = -yperpix;
     if (xperpix == 0)
@@ -1200,7 +1201,7 @@ static void canvas_donecanvasdialog(t_glist *x,
 static void canvas_done_popup(t_canvas *x, t_float which,
     t_float xpos, t_float ypos)
 {
-    char pathbuf[MAXPDSTRING], namebuf[MAXPDSTRING], *basenamep;
+    char namebuf[MAXPDSTRING], *basenamep;
     t_gobj *y;
     for (y = x->gl_list; y; y = y->g_next)
     {
@@ -1396,15 +1397,17 @@ void canvas_doclick(t_canvas *x, int xpos, int ypos, int which,
             }
                 /* look for an outlet */
             else if (ob && (noutlet = obj_noutlets(ob)) &&
-                ypos >= y2 - 1 - 3*x->gl_zoom)
+                ypos >= y2 - (OHEIGHT*x->gl_zoom) + x->gl_zoom)
             {
                 int width = x2 - x1;
+                int iow = IOWIDTH * x->gl_zoom;
                 int nout1 = (noutlet > 1 ? noutlet - 1 : 1);
                 int closest = ((xpos-x1) * (nout1) + width/2)/width;
                 int hotspot = x1 +
-                    (width - IOWIDTH) * closest / (nout1);
+                    (width - iow) * closest / (nout1);
                 if (closest < noutlet &&
-                    xpos >= (hotspot-1) && xpos <= hotspot + (IOWIDTH+1))
+                    xpos >= (hotspot - x->gl_zoom) &&
+                    xpos <= hotspot + (iow + x->gl_zoom))
                 {
                     if (doit)
                     {
@@ -1588,14 +1591,16 @@ void canvas_doconnect(t_canvas *x, int xpos, int ypos, int which, int doit)
             }
             if (doit)
             {
+                int iow = IOWIDTH * x->gl_zoom;
+                int iom = IOMIDDLE * x->gl_zoom;
                 oc = obj_connect(ob1, closest1, ob2, closest2);
                 lx1 = x11 + (noutlet1 > 1 ?
-                        ((x12-x11-IOWIDTH) * closest1)/(noutlet1-1) : 0)
-                             + IOMIDDLE;
+                        ((x12-x11-iow) * closest1)/(noutlet1-1) : 0)
+                             + iom;
                 ly1 = y12;
                 lx2 = x21 + (ninlet2 > 1 ?
-                        ((x22-x21-IOWIDTH) * closest2)/(ninlet2-1) : 0)
-                            + IOMIDDLE;
+                        ((x22-x21-iow) * closest2)/(ninlet2-1) : 0)
+                            + iom;
                 ly2 = y21;
                 sys_vgui(
    ".x%lx.c create line %d %d %d %d -width %d -tags [list l%lx cord]\n",
@@ -1812,7 +1817,6 @@ void canvas_key(t_canvas *x, t_symbol *s, int ac, t_atom *av)
         return;
     if (x && down)
     {
-        t_object *ob;
             /* cancel any dragging action */
         if (x->gl_editor->e_onmotion == MA_MOVE)
             x->gl_editor->e_onmotion = MA_NONE;
@@ -1824,6 +1828,8 @@ void canvas_key(t_canvas *x, t_symbol *s, int ac, t_atom *av)
             /* if a text editor is open send the key on, as long as
             it is either "real" (has a key number) or else is an arrow key. */
         else if (x->gl_editor->e_textedfor && (keynum
+            || !strcmp(gotkeysym->s_name, "Home")
+            || !strcmp(gotkeysym->s_name, "End")
             || !strcmp(gotkeysym->s_name, "Up")
             || !strcmp(gotkeysym->s_name, "Down")
             || !strcmp(gotkeysym->s_name, "Left")
@@ -1929,7 +1935,6 @@ void canvas_motion(t_canvas *x, t_floatarg xpos, t_floatarg ypos,
                 &x11, &y11, &x12, &y12)))
         {
             int wantwidth = xpos - x11;
-            t_gotfn sizefn;
             t_object *ob = pd_checkobject(&y1->g_pd);
             if (ob && ((ob->te_pd->c_wb == &text_widgetbehavior) ||
                     (pd_checkglist(&ob->te_pd) &&
@@ -2095,10 +2100,10 @@ static void canvas_zoom(t_canvas *x, t_floatarg zoom)
             REZOOM(obj->te_xpix, zoom);
             REZOOM(obj->te_ypix, zoom);
                 /* pass zoom message on to all objects, except canvases
-                that aren't new-style GOPs */
+                that aren't GOP */
             if ((zoommethod = zgetfn(&obj->te_pd, gensym("zoom"))) &&
                 (!(pd_class(&obj->te_pd) == canvas_class) ||
-                (((t_glist *)obj)->gl_isgraph && ((t_glist *)obj)->gl_goprect)))
+                (((t_glist *)obj)->gl_isgraph)))
                     (*(t_zoomfn)zoommethod)(&obj->te_pd, zoom);
         }
         x->gl_zoom = zoom;
@@ -2412,7 +2417,7 @@ static void canvas_doclear(t_canvas *x)
                 if (&y->g_pd == pd_this->pd_newest) glist_select(x, y);
         }
     }
-    while (1)   /* this is pretty wierd...  should rewrite it */
+    while (1)   /* this is pretty weird...  should rewrite it */
     {
         for (y = x->gl_list; y; y = y2)
         {
@@ -2481,7 +2486,7 @@ static void glist_donewloadbangs(t_glist *x)
 
 static void canvas_dopaste(t_canvas *x, t_binbuf *b)
 {
-    t_gobj *newgobj, *last, *g2;
+    t_gobj *g2;
     int dspstate = canvas_suspend_dsp(), nbox, count;
     t_symbol *asym = gensym("#A");
         /* save and clear bindings to symbols #a, $N, $X; restore when done */
@@ -2569,8 +2574,6 @@ static void canvas_selectall(t_canvas *x)
 static void canvas_reselect(t_canvas *x)
 {
     t_gobj *g, *gwas;
-    t_selection *sel;
-    t_object *ob;
         /* if someone is text editing, and if only one object is
         selected,  deselect everyone and reselect.  */
     if (x->gl_editor->e_textedfor)
@@ -2638,7 +2641,7 @@ void canvas_connect(t_canvas *x, t_floatarg fwhoout, t_floatarg foutno,
         sys_vgui(
     ".x%lx.c create line %d %d %d %d -width %d -tags [list l%lx cord]\n",
             glist_getcanvas(x), 0, 0, 0, 0,
-            (obj_issignaloutlet(objsrc, outno) ? 2 : 1),oc);
+            (obj_issignaloutlet(objsrc, outno) ? 2 : 1) * x->gl_zoom, oc);
         canvas_fixlinesfor(x, objsrc);
     }
     return;
@@ -2657,7 +2660,7 @@ bad:
     /* LATER might have to speed this up */
 static void canvas_tidy(t_canvas *x)
 {
-    t_gobj *y, *y2, *y3;
+    t_gobj *y, *y2;
     int ax1, ay1, ax2, ay2, bx1, by1, bx2, by2;
     int histogram[NHIST], *ip, i, besthist, bestdist;
         /* if nobody is selected, this means do it to all boxes;
@@ -2806,6 +2809,7 @@ void canvas_editmode(t_canvas *x, t_floatarg state)
     if (glist_isvisible(x))
       sys_vgui("pdtk_canvas_editmode .x%lx %d\n",
           glist_getcanvas(x), x->gl_edit);
+    canvas_reflecttitle(x);
 }
 
     /* called by canvas_font below */

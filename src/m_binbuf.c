@@ -216,7 +216,7 @@ void binbuf_gettext(t_binbuf *x, char **bufp, int *lengthp)
         if ((ap->a_type == A_SEMI || ap->a_type == A_COMMA) &&
                 length && buf[length-1] == ' ') length--;
         atom_string(ap, string, MAXPDSTRING);
-        newlength = length + strlen(string) + 1;
+        newlength = length + (int)strlen(string) + 1;
         if (!(newbuf = resizebytes(buf, length, newlength))) break;
         buf = newbuf;
         strcpy(buf + length, string);
@@ -469,7 +469,7 @@ int canvas_getdollarzero( void);
  * the return value holds the length of the $arg (in most cases: 1)
  * buf holds the expanded $arg
  *
- * if some error occured, "-1" is returned
+ * if some error occurred, "-1" is returned
  *
  * e.g. "$1-bla" with list "10 20 30"
  * s="1-bla"
@@ -478,7 +478,7 @@ int canvas_getdollarzero( void);
  */
 int binbuf_expanddollsym(char*s, char*buf,t_atom dollar0, int ac, t_atom *av, int tonew)
 {
-  int argno=atol(s);
+  int argno = (int)atol(s);
   int arglen=0;
   char*cs=s;
   char c=*cs;
@@ -549,7 +549,7 @@ t_symbol *binbuf_realizedollsym(t_symbol *s, int ac, t_atom *av, int tonew)
         */
         if(!tonew&&(0==next)&&(0==*buf))
         {
-            return 0; /* JMZ: this should mimick the original behaviour */
+            return 0; /* JMZ: this should mimic the original behaviour */
         }
 
         strncat(buf2, buf, MAXPDSTRING/2-1);
@@ -607,7 +607,7 @@ void binbuf_eval(t_binbuf *x, t_pd *target, int argc, t_atom *argv)
     else
     {
 #if 1
-            /* count number of args in biggest message.  The wierd
+            /* count number of args in biggest message.  The weird
             treatment of "pd_objectmaker" is because when the message
             goes out to objectmaker, commas and semis are passed
             on as regular args (see below).  We're tacitly assuming here
@@ -811,7 +811,7 @@ int binbuf_read(t_binbuf *b, char *filename, char *dirname, int crflag)
         perror(namebuf);
         return (1);
     }
-    if ((length = lseek(fd, 0, SEEK_END)) < 0 || lseek(fd, 0, SEEK_SET) < 0
+    if ((length = (long)lseek(fd, 0, SEEK_END)) < 0 || lseek(fd, 0, SEEK_SET) < 0
         || !(buf = t_getbytes(length)))
     {
         fprintf(stderr, "lseek: ");
@@ -819,7 +819,7 @@ int binbuf_read(t_binbuf *b, char *filename, char *dirname, int crflag)
         close(fd);
         return(1);
     }
-    if ((readret = read(fd, buf, length)) < length)
+    if ((readret = (int)read(fd, buf, length)) < length)
     {
         fprintf(stderr, "read (%d %ld) -> %d\n", fd, length, readret);
         perror(namebuf);
@@ -920,7 +920,7 @@ int binbuf_write(t_binbuf *x, char *filename, char *dir, int crflag)
             /* estimate how many characters will be needed.  Printing out
             symbols may need extra characters for inserting backslashes. */
         if (ap->a_type == A_SYMBOL || ap->a_type == A_DOLLSYM)
-            length = 80 + strlen(ap->a_w.w_symbol->s_name);
+            length = 80 + (int)strlen(ap->a_w.w_symbol->s_name);
         else length = 40;
         if (ep - bp < length)
         {
@@ -935,8 +935,8 @@ int binbuf_write(t_binbuf *x, char *filename, char *dir, int crflag)
             bp > sbuf && bp[-1] == ' ') bp--;
         if (!crflag || ap->a_type != A_SEMI)
         {
-            atom_string(ap, bp, (ep-bp)-2);
-            length = strlen(bp);
+            atom_string(ap, bp, (unsigned int)((ep-bp)-2));
+            length = (int)strlen(bp);
             bp += length;
             ncolumn += length;
         }
@@ -990,7 +990,8 @@ static t_binbuf *binbuf_convert(t_binbuf *oldb, int maxtopd)
     t_binbuf *newb = binbuf_new();
     t_atom *vec = oldb->b_vec;
     t_int n = oldb->b_n, nextindex, stackdepth = 0, stack[MAXSTACK] = {0},
-        nobj = 0, i, gotfontsize = 0;
+        nobj = 0, gotfontsize = 0;
+	int i;
     t_atom outmess[MAXSTACK], *nextmess;
     t_float fontsize = 10;
     if (!maxtopd)
@@ -999,7 +1000,7 @@ static t_binbuf *binbuf_convert(t_binbuf *oldb, int maxtopd)
     {
         int endmess, natom;
         char *first, *second, *third;
-        for (endmess = nextindex; endmess < n && vec[endmess].a_type != A_SEMI;
+        for (endmess = (int)nextindex; endmess < n && vec[endmess].a_type != A_SEMI;
             endmess++)
                 ;
         if (endmess == n) break;
@@ -1010,7 +1011,7 @@ static t_binbuf *binbuf_convert(t_binbuf *oldb, int maxtopd)
             nextindex = endmess + 1;
             continue;
         }
-        natom = endmess - nextindex;
+        natom = endmess - (int)nextindex;
         if (natom > MAXSTACK-10) natom = MAXSTACK-10;
         nextmess = vec + nextindex;
         first = nextmess->a_w.w_symbol->s_name;

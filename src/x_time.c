@@ -296,6 +296,14 @@ static void line_ft1(t_line *x, t_floatarg g)
 
 static void line_stop(t_line *x)
 {
+    if (pd_compatibilitylevel >= 48)
+    {
+        if (clock_getsystime() >= x->x_targettime)
+            x->x_setval = x->x_targetval;
+        else x->x_setval += x->x_1overtimediff *
+            (clock_getsystime() - x->x_prevtime) *
+                (x->x_targetval - x->x_setval);
+    }
     x->x_targetval = x->x_setval;
     clock_unset(x->x_clock);
 }
