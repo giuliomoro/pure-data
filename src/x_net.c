@@ -276,7 +276,7 @@ static void netsend_connect(t_netsend *x, t_symbol *s, int argc, t_atom *argv)
           }
       }
     outlet_float(x->x_obj.ob_outlet, 1);
-    printf("register the callback %p for sockfd %d (object %p) for deletion in case a send() fails\n", netsend_disconnect, sockfd, x);
+    // printf("register the callback %p for sockfd %d (object %p) for deletion in case a send() fails\n", netsend_disconnect, sockfd, x);
     sys_addsendfdrmfn(sockfd, (t_fdsendrmfn)netsend_disconnect, x);
 }
 
