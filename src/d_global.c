@@ -5,9 +5,10 @@
 /*  send~, receive~, throw~, catch~ */
 
 #include "m_pd.h"
+#include "s_stuff.h" // for DEFDACBLKSIZE
 #include <string.h>
 
-#define DEFSENDVS 64    /* LATER get send to get this from canvas */
+#define DEFSENDVS DEFDACBLKSIZE    /* LATER get send to get this from canvas */
 
 /* ----------------------------- send~ ----------------------------- */
 static t_class *sigsend_class;
