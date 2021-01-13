@@ -74,6 +74,8 @@ that didn't really belong anywhere. */
 #include "pthread.h"
 #endif
 
+#define THREADED_GUI_IO
+
 #ifdef THREADED_IO
 #include "ringbuffer.h"
 #endif // THREADED_IO
@@ -161,6 +163,9 @@ struct _instanceinter
     ring_buffer* i_rbsend;
     pthread_t i_iothread;
     int i_dontmanageio;
+#ifdef THREADED_GUI_IO
+    ring_buffer* i_guibuf_rb;
+#endif // THREADED_GUI_IO
 #endif // THREADED_IO
 
 #ifdef _WIN32
@@ -346,6 +351,9 @@ void sys_doio(t_pdinstance* pd_that)
 #ifdef THREADED_IO
     sys_unlockio();
     rb_dosend(pd_this->pd_inter->i_rbsend);
+#ifdef THREADED_GUI_IO
+    rb_dosend(pd_this->pd_inter->i_guibuf_rb);
+#endif // THREADED_GUI_IO
 #endif // THREADED_IO
 #ifdef PDINSTANCE
     pd_this = pd_bak;
@@ -1076,6 +1084,10 @@ void sys_vgui(const char *fmt, ...)
         pd_this->pd_inter->i_guisize = GUI_ALLOCCHUNK;
         pd_this->pd_inter->i_guihead = pd_this->pd_inter->i_guitail = 0;
     }
+#ifdef THREADED_GUI_IO
+    if (!pd_this->pd_inter->i_guibuf_rb)
+        pd_this->pd_inter->i_guibuf_rb = rb_create(GUI_ALLOCCHUNK * 8);
+#endif // THREADED_GUI_IO
     if (pd_this->pd_inter->i_guihead > pd_this->pd_inter->i_guisize -
         (GUI_ALLOCCHUNK/2))
             sys_trytogetmoreguibuf(pd_this->pd_inter->i_guisize +
@@ -1206,7 +1218,11 @@ static int sys_flushtogui(void)
     int writesize = pd_this->pd_inter->i_guihead - pd_this->pd_inter->i_guitail,
         nwrote = 0;
     if (writesize > 0)
+#ifdef THREADED_GUI_IO
+        nwrote = (int)rb_send(pd_this->pd_inter->i_guibuf_rb, pd_this->pd_inter->i_guisock,
+#else // THREADED_GUI_IO
         nwrote = (int)send(pd_this->pd_inter->i_guisock,
+#endif // THREADED_GUI_IO
             pd_this->pd_inter->i_guibuf + pd_this->pd_inter->i_guitail,
                 writesize, 0);
 
@@ -1747,7 +1763,11 @@ static int sys_do_startgui(const char *libdir)
     }
 
     pd_this->pd_inter->i_socketreceiver = socketreceiver_new(0, 0, 0, 0);
+#ifdef THREADED_GUI_IO
+    sys_addpollfnsr(pd_this->pd_inter->i_guisock,
+#else // THREADED_GUI_IO
     sys_addpollfn(pd_this->pd_inter->i_guisock,
+#endif // THREADED_GUI_IO
         (t_fdpollfn)socketreceiver_read,
             pd_this->pd_inter->i_socketreceiver);
 
