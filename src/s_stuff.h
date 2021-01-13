@@ -60,6 +60,7 @@ EXTERN void sys_register_loader(loader_t loader);
 #define SENDDACS_SLEPT 2
 
 #define DEFDACBLKSIZE 64
+#define THREADED_IO
 extern int sys_hipriority;      /* real-time flag, true if priority boosted */
 extern int sys_schedadvance;
 extern int sys_sleepgrain;
@@ -162,6 +163,12 @@ void sched_set_using_audio(int flag);
 
 EXTERN void sys_microsleep(int microsec);
 EXTERN void sys_init_fdpoll(void);
+#ifdef THREADED_IO
+EXTERN void sys_doio(t_pdinstance* pd_that);
+EXTERN void sys_dontmanageio(int status);
+EXTERN void sys_startiothread(t_pdinstance* pd_that);
+EXTERN void sys_stopiothread();
+#endif // THREADED_IO
 
 EXTERN void sys_bail(int exitcode);
 EXTERN int sys_pollgui(void);
@@ -185,6 +192,16 @@ EXTERN void sys_closesocket(int fd);
 typedef void (*t_fdpollfn)(void *ptr, int fd);
 EXTERN void sys_addpollfn(int fd, t_fdpollfn fn, void *ptr);
 EXTERN void sys_rmpollfn(int fd);
+#ifdef THREADED_IO
+#define t_rbskt struct _rbskt
+typedef void (*t_fdsendrmfn)(void *ptr);
+EXTERN void sys_addpollrb(int fd, int preserve_boundaries);
+EXTERN t_rbskt* sys_getpollrb(int fd);
+void sys_addsendfdrmfn(int sockfd, t_fdsendrmfn, void* x);
+ssize_t sys_sendto(int sockfd, const void *buf, size_t len, int flags, void* addr, size_t addrlen);
+EXTERN int rb_recv(t_rbskt* rbskt, char* buf, size_t length, void* nothing);
+EXTERN int rbskt_bytes_available(t_rbskt* rbskt);
+#endif // THREADED_IO
 #if defined(USEAPI_OSS) || defined(USEAPI_ALSA)
 void sys_setalarm(int microsec);
 #endif

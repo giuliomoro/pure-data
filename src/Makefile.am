@@ -113,7 +113,8 @@ pd_SOURCES_core = \
     x_time.c \
     x_vexp.c \
     x_vexp_fun.c \
-    x_vexp_if.c
+    x_vexp_if.c \
+    ringbuffer.c
 
 # pd-watchdog and "local" pd symlink location for tcl scripts
 libpdbindir = $(pkglibdir)/bin

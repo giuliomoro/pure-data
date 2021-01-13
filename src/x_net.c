@@ -118,6 +118,9 @@ static void *netsend_new(t_symbol *s, int argc, t_atom *argv)
 
 static void netsend_readbin(t_netsend *x, int fd)
 {
+#ifdef THREADED_IO
+    t_rbskt* rbskt = sys_getpollrb(fd);
+#endif // THREADED_IO
     unsigned char inbuf[INBUFSIZE];
     int ret = 0, readbytes = 0, i;
     struct sockaddr_storage fromaddr = {0};
@@ -129,11 +132,16 @@ static void netsend_readbin(t_netsend *x, int fd)
     }
     while (1)
     {
+#ifdef THREADED_IO
+        // TODO: retrieve fromaddr
+        ret = rb_recv(rbskt, (char*)inbuf, INBUFSIZE, 0);
+#else // THREADED_IO
         if (x->x_protocol == SOCK_DGRAM)
             ret = (int)recvfrom(fd, inbuf, INBUFSIZE, 0,
                 (struct sockaddr *)&fromaddr, &fromaddrlen);
         else
             ret = (int)recv(fd, inbuf, INBUFSIZE, 0);
+#endif // THREADED_IO
         if (ret <= 0)
         {
             if (ret < 0)
@@ -177,9 +185,15 @@ static void netsend_readbin(t_netsend *x, int fd)
             /* throttle */
             if (readbytes >= INBUFSIZE)
                 return;
+#ifdef THREADED_IO
+            /* check for more data available */
+            if (rbskt_bytes_available(rbskt) <= 0)
+                return;
+#else // THREADED_IO
             /* check for pending UDP packets */
             if (socket_bytes_available(fd) <= 0)
                 return;
+#endif // THREADED_IO
         }
         else
         {
@@ -243,6 +257,8 @@ static void netsend_notify(void *z, int fd)
         outlet_float(x->x_obj.ob_outlet, 0);
     }
 }
+
+static void netsend_disconnect(t_netsend *x);
 
 static void netsend_connect(t_netsend *x, t_symbol *s, int argc, t_atom *argv)
 {
@@ -394,17 +410,27 @@ static void netsend_connect(t_netsend *x, t_symbol *s, int argc, t_atom *argv)
     x->x_sockfd = sockfd;
     if (x->x_msgout) /* add polling function for return messages */
     {
-        if (x->x_bin)
+        if (x->x_bin) {
             sys_addpollfn(x->x_sockfd, (t_fdpollfn)netsend_readbin, x);
+#ifdef THREADED_IO
+            sys_addpollrb(x->x_sockfd, SOCK_DGRAM == x->x_protocol);
+#endif // THREADED_IO
+        }
         else
         {
             t_socketreceiver *y =
               socketreceiver_new((void *)x, netsend_notify, netsend_read,
                                  x->x_protocol == SOCK_DGRAM);
             sys_addpollfn(x->x_sockfd, (t_fdpollfn)socketreceiver_read, y);
+#ifdef THREADED_IO
+            sys_addpollrb(x->x_sockfd, SOCK_DGRAM == x->x_protocol);
+#endif // THREADED_IO
             x->x_receiver = y;
         }
     }
+#ifdef THREADED_IO
+	sys_addsendfdrmfn(x->x_sockfd, (t_fdsendrmfn)netsend_disconnect, x);
+#endif // THREADED_IO
     outlet_float(x->x_obj.ob_outlet, 1);
     return;
 connect_fail:
@@ -462,11 +488,19 @@ static int netsend_dosend(t_netsend *x, int sockfd, int argc, t_atom *argv)
         {
             socklen_t addrlen = (x->x_server.ss_family == AF_INET6 ?
                 sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in));
+#ifdef THREADED_IO
+            res = sys_sendto(sockfd, bp, length-sent, 0, &x->x_server, addrlen);
+#else // THREADED_IO
             res = (int)sendto(sockfd, bp, length-sent, 0,
                 (struct sockaddr *)&x->x_server, addrlen);
+#endif // THREADED_IO
         }
         else
+#ifdef THREADED_IO
+            res = sys_sendto(sockfd, bp, length-sent, 0, NULL, 0);
+#else // THREADED_IO
             res = (int)send(sockfd, bp, length-sent, 0);
+#endif // THREADED_IO
 
         timeafter = sys_getrealtime();
         late = (timeafter - timebefore > 0.005);
@@ -596,8 +630,12 @@ static void netreceive_connectpoll(t_netreceive *x)
             x->x_nconnections * sizeof(t_socketreceiver*),
             nconnections * sizeof(t_socketreceiver*));
         x->x_receivers[x->x_nconnections] = NULL;
-        if (x->x_ns.x_bin)
+        if (x->x_ns.x_bin) {
             sys_addpollfn(fd, (t_fdpollfn)netsend_readbin, x);
+#ifdef THREADED_IO
+            sys_addpollrb(fd, SOCK_DGRAM == x->x_ns.x_protocol);
+#endif // THREADED_IO
+        }
         else
         {
             t_socketreceiver *y = socketreceiver_new((void *)x,
@@ -607,6 +645,9 @@ static void netreceive_connectpoll(t_netreceive *x)
                 socketreceiver_set_fromaddrfn(y,
                     (t_socketfromaddrfn)netreceive_fromaddr);
             sys_addpollfn(fd, (t_fdpollfn)socketreceiver_read, y);
+#ifdef THREADED_IO
+            sys_addpollrb(fd, SOCK_DGRAM == x->x_ns.x_protocol);
+#endif // THREADED_IO
             x->x_receivers[x->x_nconnections] = y;
         }
         outlet_float(x->x_ns.x_connectout, (x->x_nconnections = nconnections));
@@ -808,8 +849,12 @@ static void netreceive_listen(t_netreceive *x, t_symbol *s, int argc, t_atom *ar
 
     if (protocol == SOCK_DGRAM) /* datagram protocol */
     {
-        if (x->x_ns.x_bin)
+        if (x->x_ns.x_bin) {
             sys_addpollfn(x->x_ns.x_sockfd, (t_fdpollfn)netsend_readbin, x);
+#ifdef THREADED_IO
+            sys_addpollrb(x->x_ns.x_sockfd, SOCK_DGRAM == x->x_ns.x_protocol);
+#endif // THREADED_IO
+        }
         else
         {
                 /* a UDP receiver doesn't get notifications! */
@@ -819,6 +864,9 @@ static void netreceive_listen(t_netreceive *x, t_symbol *s, int argc, t_atom *ar
                 socketreceiver_set_fromaddrfn(y,
                     (t_socketfromaddrfn)netreceive_fromaddr);
             sys_addpollfn(x->x_ns.x_sockfd, (t_fdpollfn)socketreceiver_read, y);
+#ifdef THREADED_IO
+            sys_addpollrb(x->x_ns.x_sockfd, SOCK_DGRAM == x->x_ns.x_protocol);
+#endif // THREADED_IO
             x->x_ns.x_connectout = 0;
             x->x_ns.x_receiver = y;
         }

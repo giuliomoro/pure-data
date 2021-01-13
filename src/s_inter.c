@@ -74,9 +74,22 @@ that didn't really belong anywhere. */
 #include "pthread.h"
 #endif
 
+#ifdef THREADED_IO
+#include "ringbuffer.h"
+
+typedef struct _fdsend {
+    int fds_fd;
+    t_fdsendrmfn fds_fn;
+    void *fds_ptr;
+} t_fdsend;
+#endif // THREADED_IO
+
 typedef enum {
     kFdpManagerAnyThread,
     kFdpManagerAudioThread,
+#ifdef THREADED_IO
+    kFdpManagerIoThread,
+#endif // THREADED_IO
 } t_fdp_manager;
 
 typedef struct _fdpoll
@@ -85,6 +98,10 @@ typedef struct _fdpoll
     t_fdpollfn fdp_fn;
     void *fdp_ptr;
     t_fdp_manager fdp_manager;
+#ifdef THREADED_IO
+    int fdp_callback_in_audio_thread;
+    t_rbskt* fdp_rbskt;
+#endif // THREADED_IO
 } t_fdpoll;
 
 #define INBUFSIZE 4096
@@ -127,6 +144,16 @@ struct _instanceinter
     int i_waitingforping;
     int i_bytessincelastping;
     int i_fdschanged;   /* flag to break fdpoll loop if fd list changes */
+#ifdef THREADED_IO
+    ring_buffer* i_guibuf_rb;
+    ring_buffer* i_rbsend; // single rb for outbound fds
+    pthread_t i_iothread; // optional internal IO thread
+    volatile int i_iothreadstop; // flag to stop internal IO thread
+    int i_dontmanageio; // tell the audio thread that someone else is managing IO
+    int i_nfdsend;
+    t_fdsend *i_fdsend;
+    ring_buffer* i_rbrmfdsend; // asynchronously report error on outbound fds
+#endif // THREADED_IO
 
 #ifdef _WIN32
     LARGE_INTEGER i_inittime;
@@ -144,7 +171,472 @@ void sys_set_temppath(void);
 void sys_set_extrapath(void);
 void sys_set_startup(void);
 void sys_stopgui(void);
+void sys_lockio();
+void sys_unlockio();
 static void fdp_select(fd_set *readset, struct timeval timout, const t_fdp_manager manager);
+static t_fdpoll* fdp_ready_next(fd_set *readset);
+
+#ifdef THREADED_IO
+#define RB_SIZE (8*INBUFSIZE)
+static void rb_dosend(ring_buffer*, int ignoreSigFd);
+static int rbsend_init();
+struct _rbskt { // t_rbskt
+    ring_buffer* rs_rb;
+    int rs_preserve_boundaries;
+    int rs_errno; // used by streaming sockets to report errors
+    int rs_closed; // used by streaming sockets to report the other end has gracefully closed the connection
+};
+
+static t_rbskt* rbskt_new(int preserve_boundaries) {
+    t_rbskt* x = (t_rbskt*)getbytes(sizeof(*x));
+    x->rs_rb = rb_create(RB_SIZE);
+    x->rs_preserve_boundaries = preserve_boundaries;
+    x->rs_errno = 0;
+    x->rs_closed = 0;
+    return x;
+}
+
+static void rbskt_free(t_rbskt* x) {
+    if(x) {
+        rb_free(x->rs_rb);
+        freebytes(x, sizeof(*x));
+    }
+}
+
+static int rbskt_ready(t_rbskt* x) {
+    return x && x->rs_rb && (x->rs_closed || x->rs_errno || rb_available_to_read(x->rs_rb));
+}
+
+int rbskt_bytes_available(t_rbskt* rbskt) {
+    return rb_available_to_read(rbskt->rs_rb);
+}
+
+// to ensure the correct order is preserved when calling send()/sendto()
+// directly from outside rb_dosendone(), always flush the corresponding
+// ringbuffer first
+// should_lock should be set to true if this is not called from the IO thread
+static void sendrb_flush(ring_buffer* rb, int should_lock) {
+    if(should_lock)
+        sys_lockio();
+    rb_dosend(rb, -1);
+    if(should_lock)
+        sys_unlockio();
+}
+
+// A sendto() that writes to a ring_buffer and is real-time safe
+static ssize_t rb_sendto(ring_buffer* rb, int socket, const void *buffer, size_t length, int flags, void* addr, size_t addrlen)
+{
+    //printf("rb_sendto: fd: %d, rb: %p \"%s\"\n", socket, rb, (char*)buffer);
+    size_t maxLength = rb_available_to_write(rb);
+    size_t desiredLength = sizeof(size_t) + length;
+    size_t actualLength = desiredLength <= maxLength ? desiredLength : maxLength;
+    if(actualLength < desiredLength)
+    {
+        perror("rb buffer is full, sending packet from the audio thread");
+        sendrb_flush(rb, 1);
+        // then send out the new data
+        return sendto(socket, buffer, length, 0, addr, addrlen);
+    }
+    rb_write_to_buffer(rb, 5,
+            (char*)&socket, sizeof(socket),
+            (char*)&length, sizeof(length),
+            buffer, length,
+            (char*)&addrlen, sizeof(addrlen),
+            addr, addrlen
+        );
+    return actualLength;
+}
+
+// A send() that writes to a ring_buffer and is real-time safe
+ssize_t rb_send(ring_buffer* rb, int socket, const void *buffer, size_t length, int flags)
+{
+    return rb_sendto(rb, socket, buffer, length, flags, NULL, 0);
+}
+
+// a drop-in replacement for sendto(), exposed for public use, safe to call from a real-time thread
+ssize_t sys_sendto(int sockfd, const void *buf, size_t len, int flags, void* addr, size_t addrlen)
+{
+    if(rbsend_init())
+        return -1;
+    return rb_sendto(pd_this->pd_inter->i_rbsend, sockfd, buf, len, flags, addr, addrlen);
+}
+
+static void gui_failed(const char* s);
+// Read one message from the ring buffer and send it to the network
+static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
+{
+    int ret;
+    int socket;
+    size_t length;
+    char* buf;
+    size_t addrlen;
+    struct sockaddr rbaddr;
+    struct sockaddr* addr;
+    if(rb_read_from_buffer(rb, (char*)&socket, sizeof(socket)) < 0)
+    {
+        // no message to retrieve
+        return 0;
+    }
+    if(rb_read_from_buffer(rb, (char*)&length, sizeof(length)) < 0)
+    {
+        perror("we should not be here 1");
+        return -1;
+    }
+    buf = (char*)malloc(length);
+    if(rb_read_from_buffer(rb, buf, length) < 0)
+    {
+        perror("we should not be here 2");
+        ret = -1;
+        goto done;
+    }
+    if(rb_read_from_buffer(rb, (char*)&addrlen, sizeof(addrlen)) < 0)
+    {
+        perror("we should not be here 3");
+        ret = -1;
+        goto done;
+    }
+    if(rb_read_from_buffer(rb, (char*)&rbaddr, addrlen) < 0)
+    {
+        perror("we should not be here 4");
+        ret = -1;
+        goto done;
+    }
+    int flags = 0;
+#if 0 // turns out this is not portable
+    if(ignoreSigFd == socket)
+        flags = MSG_NOSIGNAL;
+#endif
+    if(addrlen)
+        addr = &rbaddr;
+    else
+        addr = NULL;
+    ret = sendto(socket, buf, length, flags, addr, addrlen);
+    if (ret < 0)
+    {
+        // if it wasn't ignored, the program would crash in sendto()
+        if(EPIPE == errno && ignoreSigFd == socket) {
+            printf ("EPIPE on %d\n", socket);
+        } else {
+            fprintf(stderr, "failed sendto(%d, %p, %lu, %d, %p, %lu) call: %d %s\n", socket, buf, length, flags, addr, addrlen, errno, strerror(errno));
+            ring_buffer* rbrmfdsend = pd_this->pd_inter->i_rbrmfdsend;
+            if(rbrmfdsend)
+                rb_write_to_buffer(rbrmfdsend, 1, &socket, sizeof(socket));
+            else
+                printf("rbrmfdsend is not inited. Cannot delete fd %d\n", socket);
+            if(socket == pd_this->pd_inter->i_guisock)
+                gui_failed("pd-to-gui socket");
+        }
+    }
+done:
+    free(buf);
+    return ret;
+}
+
+// Read all the messages from the ring buffer and send them down the network
+// This should be called regularly from a non-realtime thread
+static void rb_dosend(ring_buffer* rb, int ignoreSigPipe) {
+    if(!rb)
+        return;
+    int ret;
+    while((ret = rb_dosendone(rb, ignoreSigPipe) > 0))
+        ;
+    if(ret < 0)
+        fprintf(stderr, "outgoing rb %p is corrupted.\n", rb);
+}
+
+// an internal loop that is run by Pd when it manages its IO
+// in a separate thread
+static void* poll_thread_loop(void* arg)
+{
+    printf("Running polling thread\n");
+    t_pdinstance* pd_that = (t_pdinstance*)arg;
+    while(!pd_that->pd_inter->i_iothreadstop)
+    {
+        sys_doio(pd_that);
+        usleep(3000);
+    }
+    printf("Exiting polling thread\n");
+    return NULL;
+}
+
+// helper to start a thread to manage IO
+void sys_startiothread(t_pdinstance* pd_that)
+{
+    sys_dontmanageio(1);
+    if(!pd_that->pd_inter->i_iothread)
+    {
+        pd_that->pd_inter->i_iothreadstop = 0;
+        pthread_create(&pd_that->pd_inter->i_iothread, NULL, poll_thread_loop,
+            (void*)pd_that);
+#ifdef _GNU_SOURCE
+        pthread_setname_np(pd_that->pd_inter->i_iothread, "pd-fdPollThread");
+#endif // _GNU_SOURCE
+    }
+}
+
+void sys_stopiothread()
+{
+    pthread_t t = pd_this->pd_inter->i_iothread;
+    if(t) {
+        pd_this->pd_inter->i_iothreadstop = 1;
+        pthread_join(t, NULL);
+    }
+    sys_dontmanageio(0);
+}
+
+// initialise the global ringbuffer used for writing to network fds
+static int rbsend_init()
+{
+    if(!pd_this->pd_inter->i_rbsend)
+        pd_this->pd_inter->i_rbsend = rb_create(8 * RB_SIZE);
+    if(!pd_this->pd_inter->i_rbsend)
+    {
+        perror("unable to create ring buffer for outgoing network packets");
+        return -1;
+    }
+    return 0;
+}
+
+static int rbrmfdsend_init()
+{
+    if(!pd_this->pd_inter->i_rbrmfdsend)
+        pd_this->pd_inter->i_rbrmfdsend = rb_create(4096);
+    if(!pd_this->pd_inter->i_rbrmfdsend)
+    {
+        perror("unable to create ring buffer for failed fds");
+        return -1;
+    }
+    return 0;
+}
+
+// helper to retrieve a t_fdpoll from the fd
+static t_fdpoll* find_fdpoll(int fd)
+{
+    t_fdpoll *fp;
+    for(fp = pd_this->pd_inter->i_fdpoll; fp < pd_this->pd_inter->i_fdpoll + pd_this->pd_inter->i_nfdpoll; ++fp) {
+        if(fp->fdp_fd == fd)
+            return fp;
+    }
+    return NULL;
+}
+
+// create a rbskt associated with a given fd
+void sys_addpollrb(int fd, int preserve_boundaries)
+{
+    t_fdpoll *fp = find_fdpoll(fd);
+    rbskt_free(fp->fdp_rbskt);
+    fp->fdp_rbskt = rbskt_new(preserve_boundaries);
+    fp->fdp_callback_in_audio_thread = 0;
+    fp->fdp_manager = kFdpManagerIoThread;
+}
+
+// return the rbskt associated with a given fd
+t_rbskt* sys_getpollrb(int fd)
+{
+    t_fdpoll* fp = find_fdpoll(fd);
+    return fp->fdp_rbskt;
+}
+
+int rb_recv(t_rbskt* rbskt, char* buf, size_t buflen, void* nothing)
+{
+    ring_buffer* rb = rbskt->rs_rb;
+    int ret;
+    ssize_t msglen;
+    int available;
+    available = rb_available_to_read(rb);
+    if(rbskt->rs_preserve_boundaries) {
+        if(available < sizeof(ssize_t))
+            return 0;
+        if((ret = rb_read_from_buffer(rb, (char*)&msglen, sizeof(msglen))))
+        {
+            perror("Error while reading from ring_buffer in rb_recv: couldn't read from rb");
+            errno = EPERM;
+            return -1;
+        }
+        // msglen contains the return value of recv(), or -errno if an error occurred
+        if(msglen <= 0) {
+            printf("%p Msglen: %ld\n", rb, msglen);
+            // to comply with recvfrom(),
+            // set errno and return -1
+            errno = -msglen;
+            return -1;
+        }
+        // if recv() was successful, the ring buffer should contain at least as
+        // much data as was retrieved by it.
+        available -= sizeof(msglen);
+    } else {
+        // if an error occurred, it was passed by setting the errno field
+        if(rbskt->rs_errno) {
+            errno = rbskt->rs_errno;
+            // TODO: resetting this is unsafe, as it may be modified by the other thread
+            // however, most likely after an error the pollfn and fd will be removed
+            rbskt->rs_errno = 0;
+            return -1;
+        } else
+            msglen = available;
+    }
+    if(available < msglen) {
+        printf("%p msglen: %ld available: %d\n", rb, msglen, available);
+        errno = EPERM;
+        perror("Error while reading from ring_buffer in rb_recv: not enough data in rb");
+        return -1;
+    }
+    // only request as many bytes as we can store if they are available
+    int actualLength = buflen < msglen ? buflen : msglen;
+    ret = rb_read_from_buffer(rb, buf, actualLength);
+    if(ret)
+    {
+        errno = EPERM;
+        perror("Error while reading from ring_buffer in rb_recv");
+        return -1;
+    }
+    if(msglen > buflen) {
+        if(rbskt->rs_preserve_boundaries) {
+            printf("buflen: %zu, msglen: %zd, actualLength: %d\n", buflen, msglen, actualLength);
+            printf("warning: incoming packet truncated from %d to %d bytes.", ret, INBUFSIZE);
+            // drain buffer
+            char dest;
+            while(1 == rb_read_from_buffer(rb, &dest, 1))
+                    ;
+        }
+    }
+    return actualLength;
+}
+
+// if this is called with (1), then the audio thread will not manage the I/O
+// and the user will be responsible to regularly call sys_doio()
+void sys_dontmanageio(int status)
+{
+    pd_this->pd_inter->i_dontmanageio = status;
+}
+
+// register a callback to delete an object when a send fd fails in the IO
+// thread. This allows to report errors asynchronously
+void sys_addsendfdrmfn(int fd, t_fdsendrmfn fn, void* ptr)
+{
+    int nfd, size;
+    t_fdsend *fs;
+    if (!pd_this->pd_inter->i_fdsend)
+    {
+        /* create an empty FD list */
+        pd_this->pd_inter->i_fdsend = (t_fdsend *)t_getbytes(0);
+        pd_this->pd_inter->i_nfdsend= 0;
+    }
+    if(rbrmfdsend_init())
+        return;
+    nfd = pd_this->pd_inter->i_nfdsend;
+    size = nfd * sizeof(t_fdsend);
+    pd_this->pd_inter->i_fdsend = (t_fdsend *)t_resizebytes(
+        pd_this->pd_inter->i_fdsend, size, size + sizeof(t_fdsend));
+    fs = pd_this->pd_inter->i_fdsend + nfd;
+    fs->fds_fd = fd;
+    fs->fds_fn = fn;
+    fs->fds_ptr = ptr;
+    pd_this->pd_inter->i_nfdsend = nfd + 1;
+}
+
+// a partial replacement for the functionalities of sys_domicrosleep() when
+// enabling THREADED_IO. Namely:
+// - check for ready file descriptors, and for each ready one:
+//  - if it has a RT-friendly callback, retrieve the new data from the
+//  socket and place it in a ring buffer. sys_domicrosleep() will then call the
+//  callback which will retrieve the data from the buffer
+//  - otherwise, mark it so that the callback will be called from
+//  sys_domicrosleep()) at the first occasion
+//
+// As a consequence of this:
+//  - for callbacks that are RT-friendly, sys_domicrosleep() does not need to select()
+//  - for callbacks that are not RT-friendly, sys_domicrosleep() doesn't have to select()
+//  at every call, but only when data is actually available.
+static void poll_fds()
+{
+    const unsigned int maxRecv = INBUFSIZE;
+    char* buf = NULL;
+    ssize_t ret;
+    struct timeval timout = {0}; // making this timeout longer would be more efficient (by avoiding spurious wakeups), but it would needlessly postpone writes
+    int pollem = 1;
+    t_fdpoll *fp;
+    if (pollem && pd_this->pd_inter->i_nfdpoll)
+    {
+        fd_set readset;
+        fdp_select(&readset, timout, kFdpManagerIoThread);
+        int count = 0;
+        while((fp = fdp_ready_next(&readset)))
+        {
+            if(fp->fdp_callback_in_audio_thread)
+            {
+                // temporarily transfer ownership
+                fp->fdp_manager = kFdpManagerAudioThread;
+            }
+            else
+            {
+                if(!buf)
+                    buf = (char*)malloc(maxRecv);
+                int fd = fp->fdp_fd;
+                t_rbskt* rbskt = fp->fdp_rbskt;
+                ring_buffer* rb = rbskt->rs_rb;
+                unsigned int size = rb_available_to_write(rb);
+                size = size > maxRecv ? maxRecv : size;
+                // TODO: handle case where there is not enough space available in
+                // the buffer. What is causing it? Too much data available or too
+                // much data left in the rb because the other thread hasn't
+                // processed it yet?
+
+                // we adapted socketreceiver_read and netsend_readbin to use
+                // rb_recv instead of recv. So here we are only reading from the
+                // socket and making the data available through rb_recv
+                ret = recv(fd, buf, size, 0);
+                if(ret < 0)
+                {
+                    size = 0;
+                    ret = -errno;
+                } else {
+                    size = ret;
+                }
+                // store the received data in the ringbuffer
+                if(rbskt->rs_preserve_boundaries)
+                    ret = rb_write_to_buffer(rb, 2, &ret, sizeof(ret), buf, size);
+                else {
+                    if(0 == ret) {
+                        // recv() returning 0 on a streaming socket means the
+                        // other hand has closed the connection
+                        rbskt->rs_closed = 1;
+                    } else if (ret < 0) {
+                        // an error has occurred, we store errno
+                        rbskt->rs_errno = -ret;
+                    } else {
+                        // everything OK, let's send the data
+                        ret = rb_write_to_buffer(rb, 1, buf, size);
+                        if(ret)
+                            post("error while writing to ring buffer for fd %d\n", fd);
+                    }
+                }
+            }
+        }
+    }
+    free(buf);
+}
+
+// call this from a non-real-time thread to process IO
+// it thread-safely acceesses elements of pd_inter, but as it
+// it needs a reference ot the "pd_this" that it is operating on
+void sys_doio(t_pdinstance* pd_that)
+{
+#ifdef PDINSTANCE
+    t_pdinstance* pd_bak = pd_this;
+    pd_this = pd_that;
+#endif // PDINSTANCE
+    sys_lockio();
+    poll_fds();
+    rb_dosend(pd_this->pd_inter->i_rbsend, -1);
+    rb_dosend(pd_this->pd_inter->i_guibuf_rb, -1);
+    sys_unlockio();
+#ifdef PDINSTANCE
+    pd_this = pd_bak;
+#endif // PDINSTANCE
+}
+
+#endif // THREADED_IO
 
 /* ----------- functions for timing, signals, priorities, etc  --------- */
 
@@ -222,6 +714,24 @@ static void fdp_select(fd_set *readset, struct timeval timout, const t_fdp_manag
             perror("microsleep select");
 }
 
+// helper to iterate through the ISSET fds in readset and return the next one
+// that is ready. It modifies readset by clearing the corresponding fd
+static t_fdpoll* fdp_ready_next(fd_set *readset) {
+    t_fdpoll *fp;
+    int fd;
+    for(fp = pd_this->pd_inter->i_fdpoll;
+            fp < pd_this->pd_inter->i_fdpoll + pd_this->pd_inter->i_nfdpoll;
+            fp++)
+    {
+        fd = fp->fdp_fd;
+        if(FD_ISSET(fd, readset)) {
+                FD_CLR(fd, readset);
+                return fp;
+        }
+    }
+    return NULL;
+}
+
 /* sleep (but cancel the sleeping if pollem is set and any file descriptors are
 ready - in that case, dispatch any resulting Pd messages and return.  Called
 with sys_lock() set.  We will temporarily release the lock if we actually
@@ -234,6 +744,35 @@ static int sys_domicrosleep(int microsec, int pollem)
     timout.tv_usec = 0;
     if (pollem && pd_this->pd_inter->i_nfdpoll)
     {
+#ifdef THREADED_IO
+        // Pd was built with THREADED_IO support, but no one has taken
+        // charge of the IO duties, so we do it ourselves in the audio thread.
+        // Sub-optimal because of the extra memory copies, but better than
+        // nothing.
+        if(!pd_this->pd_inter->i_dontmanageio)
+            sys_doio(pd_this);
+        ring_buffer* rbrmfdsend = pd_this->pd_inter->i_rbrmfdsend;
+        if(rbrmfdsend)
+        {
+            // fds queued for deletion upon a failed send() call
+            while(rb_available_to_read(rbrmfdsend) >= sizeof(int))
+            {
+                int fd;
+                rb_read_from_buffer(rbrmfdsend, (char*)&fd, sizeof(fd));
+                printf("Removing send fd %d from send list\n", fd);
+                // find what object owns it
+                for(i = 0; i < pd_this->pd_inter->i_nfdsend; ++i)
+                {
+                    t_fdsend* fdsends = pd_this->pd_inter->i_fdsend;
+                    if(fd == fdsends[i].fds_fd)
+                    {
+                        printf("fd %d found to belong to %p, so calling %p\n", fd, fdsends[i].fds_ptr, fdsends[i].fds_fn);
+                        fdsends[i].fds_fn(fdsends[i].fds_ptr);
+                    }
+                }
+            }
+        }
+#endif // THREADED_IO
         fd_set readset;
         fdp_select(&readset, timout, kFdpManagerAudioThread);
         pd_this->pd_inter->i_fdschanged = 0;
@@ -248,6 +787,11 @@ static int sys_domicrosleep(int microsec, int pollem)
                     should_call = 1;
                     didsomething = 1;
                 }
+            } else {
+#ifdef THREADED_IO
+                if(rbskt_ready(fp->fdp_rbskt))
+                    should_call = 1;
+#endif // THREADED_IO
             }
             if(should_call)
             {
@@ -255,6 +799,11 @@ static int sys_domicrosleep(int microsec, int pollem)
                     (pd_this->pd_inter->i_fdpoll[i].fdp_ptr,
                         pd_this->pd_inter->i_fdpoll[i].fdp_fd);
             }
+#ifdef THREADED_IO
+            // restore ownership to IO thread
+            if(kFdpManagerAudioThread == fp->fdp_manager)
+               fp->fdp_manager = kFdpManagerIoThread;
+#endif // THREADED_IO
         }
         if (didsomething)
             return (1);
@@ -432,6 +981,7 @@ void sys_sockerror(const char *s)
 
 void sys_addpollfn(int fd, t_fdpollfn fn, void *ptr)
 {
+    sys_lockio();
     int nfd, size;
     t_fdpoll *fp;
     sys_init_fdpoll();
@@ -443,23 +993,42 @@ void sys_addpollfn(int fd, t_fdpollfn fn, void *ptr)
     fp->fdp_fd = fd;
     fp->fdp_fn = fn;
     fp->fdp_ptr = ptr;
+#ifdef THREADED_IO
+    fp->fdp_manager = kFdpManagerIoThread;
+    fp->fdp_callback_in_audio_thread = 1;
+    fp->fdp_rbskt = NULL;
+#else // THREADED_IO
     fp->fdp_manager = kFdpManagerAudioThread;
+#endif // THREADED_IO
     pd_this->pd_inter->i_nfdpoll = nfd + 1;
     if (fd >= pd_this->pd_inter->i_maxfd)
         pd_this->pd_inter->i_maxfd = fd + 1;
     pd_this->pd_inter->i_fdschanged = 1;
+    sys_unlockio();
 }
 
 void sys_rmpollfn(int fd)
 {
+    sys_lockio();
+#ifdef THREADED_IO
+    // we don't know why we are removing the fd: it could be that the socket
+    // failed, in which case sendto() would fail with SIGPIPE, so we ask
+    // rb_dosend to ignore it this time around.
+    rb_dosend(pd_this->pd_inter->i_rbsend, fd);
+    rb_dosend(pd_this->pd_inter->i_guibuf_rb, fd);
+#endif // THREADED_IO
     int nfd = pd_this->pd_inter->i_nfdpoll;
     int i, size = nfd * sizeof(t_fdpoll);
+    int found = 0;
     t_fdpoll *fp;
     pd_this->pd_inter->i_fdschanged = 1;
     for (i = nfd, fp = pd_this->pd_inter->i_fdpoll; i--; fp++)
     {
         if (fp->fdp_fd == fd)
         {
+#ifdef THREADED_IO
+            rbskt_free(fp->fdp_rbskt);
+#endif // THREADED_IO
             while (i--)
             {
                 fp[0] = fp[1];
@@ -468,10 +1037,13 @@ void sys_rmpollfn(int fd)
             pd_this->pd_inter->i_fdpoll = (t_fdpoll *)t_resizebytes(
                 pd_this->pd_inter->i_fdpoll, size, size - sizeof(t_fdpoll));
             pd_this->pd_inter->i_nfdpoll = nfd - 1;
-            return;
+            found = 1;
+            break;
         }
     }
-    post("warning: %d removed from poll list but not found", fd);
+    if(!found)
+        post("warning: %d removed from poll list but not found", fd);
+    sys_unlockio();
 }
 
 t_socketreceiver *socketreceiver_new(void *owner, t_socketnotifier notifier,
@@ -534,10 +1106,20 @@ static void socketreceiver_getudp(t_socketreceiver *x, int fd)
     char buf[INBUFSIZE+1];
     socklen_t fromaddrlen = sizeof(struct sockaddr_storage);
     int ret, readbytes = 0;
+#ifdef THREADED_IO
+    t_rbskt* rbskt = sys_getpollrb(fd);
+#endif // THREADED_IO
     while (1)
     {
+#ifdef THREADED_IO
+        ret = rb_recv(rbskt, buf, INBUFSIZE, 0);
+        // TODO: retrieve fromaddr
+        x->sr_fromaddr = NULL;
+        fromaddrlen = 0;
+#else // THREADED_IO
         ret = (int)recvfrom(fd, buf, INBUFSIZE, 0,
             (struct sockaddr *)x->sr_fromaddr, (x->sr_fromaddr ? &fromaddrlen : 0));
+#endif // THREADED_IO
         if (ret < 0)
         {
                 /* socket_errno_udp() ignores some error codes */
@@ -591,9 +1173,15 @@ static void socketreceiver_getudp(t_socketreceiver *x, int fd)
             /* throttle */
             if (readbytes >= INBUFSIZE)
                 return;
+#ifdef THREADED_IO
+            /* check for more data available */
+            if (rbskt_bytes_available(rbskt) <= 0)
+                return;
+#else // THREADED_IO
             /* check for pending UDP packets */
             if (socket_bytes_available(fd) <= 0)
                 return;
+#endif // THREADED_IO
         }
     }
 }
@@ -618,8 +1206,13 @@ void socketreceiver_read(t_socketreceiver *x, int fd)
         }
         else
         {
+#ifdef THREADED_IO
+            ret = rb_recv(sys_getpollrb(fd), x->sr_inbuf + x->sr_inhead,
+                readto - x->sr_inhead, 0);
+#else // THREADED_IO
             ret = (int)recv(fd, x->sr_inbuf + x->sr_inhead,
                 readto - x->sr_inhead, 0);
+#endif // THREADED_IO
             if (ret <= 0)
             {
                 if (ret < 0)
@@ -733,6 +1326,9 @@ static void sys_trytogetmoreguibuf(int newsize)
         int bytestowrite = pd_this->pd_inter->i_guitail -
             pd_this->pd_inter->i_guihead;
         int written = 0;
+#ifdef THREADED_IO
+        sendrb_flush(pd_this->pd_inter->i_guibuf_rb, 1);
+#endif // THREADED_IO
         while (1)
         {
             int res = (int)send(pd_this->pd_inter->i_guisock,
@@ -778,6 +1374,10 @@ void sys_vgui(const char *fmt, ...)
         pd_this->pd_inter->i_guisize = GUI_ALLOCCHUNK;
         pd_this->pd_inter->i_guihead = pd_this->pd_inter->i_guitail = 0;
     }
+#ifdef THREADED_IO
+    if (!pd_this->pd_inter->i_guibuf_rb)
+        pd_this->pd_inter->i_guibuf_rb = rb_create(GUI_ALLOCCHUNK * 8);
+#endif // THREADED_IO
     if (pd_this->pd_inter->i_guihead > pd_this->pd_inter->i_guisize -
         (GUI_ALLOCCHUNK/2))
             sys_trytogetmoreguibuf(pd_this->pd_inter->i_guisize +
@@ -829,7 +1429,11 @@ static int sys_flushtogui(void)
     int writesize = pd_this->pd_inter->i_guihead - pd_this->pd_inter->i_guitail,
         nwrote = 0;
     if (writesize > 0)
+#ifdef THREADED_IO
+        nwrote = (int)rb_send(pd_this->pd_inter->i_guibuf_rb, pd_this->pd_inter->i_guisock,
+#else // THREADED_IO
         nwrote = (int)send(pd_this->pd_inter->i_guisock,
+#endif // THREADED_IO
             pd_this->pd_inter->i_guibuf + pd_this->pd_inter->i_guitail,
                 writesize, 0);
 
@@ -1371,6 +1975,10 @@ static int sys_do_startgui(const char *libdir)
     sys_addpollfn(pd_this->pd_inter->i_guisock,
         (t_fdpollfn)socketreceiver_read,
             pd_this->pd_inter->i_socketreceiver);
+#ifdef THREADED_IO
+    sys_addpollrb(pd_this->pd_inter->i_guisock, 0);
+    sys_addsendfdrmfn(pd_this->pd_inter->i_guisock, (t_fdsendrmfn)gui_failed, NULL);
+#endif // THREADED_IO
 
             /* here is where we start the pinging. */
 #if defined(__linux__) || defined(__FreeBSD_kernel__)
@@ -1535,6 +2143,9 @@ void glob_exit(void *dummy, t_float status)
     sys_exit();
     sys_close_audio();
     sys_close_midi();
+#ifdef THREADED_IO
+    sys_stopiothread();
+#endif // THREADED_IO
     if (sys_havegui())
     {
         sys_closesocket(pd_this->pd_inter->i_guisock);
@@ -1625,6 +2236,13 @@ void s_inter_free(t_instanceinter *inter)
         inter->i_fdpoll = 0;
         inter->i_nfdpoll = 0;
     }
+#ifdef THREADED_IO
+    t_freebytes(pd_this->pd_inter->i_fdsend,
+        pd_this->pd_inter->i_nfdsend * sizeof(t_fdsend));
+    rb_free(pd_this->pd_inter->i_rbrmfdsend);
+    rb_free(pd_this->pd_inter->i_rbsend);
+    rb_free(pd_this->pd_inter->i_guibuf_rb);
+#endif // THREADED_IO
     freebytes(inter, sizeof(*inter));
 }
 
@@ -1737,3 +2355,39 @@ void pd_globallock(void) {}
 void pd_globalunlock(void) {}
 
 #endif /* PDTHREADS */
+
+#ifdef THREADED_IO
+static pthread_mutex_t sys_mutexio = PTHREAD_MUTEX_INITIALIZER;
+
+void sys_lockio()
+{
+    int ret = pthread_mutex_lock(&sys_mutexio);
+    if(ret)
+        printf("lockio: %d\n", ret);
+}
+
+void sys_unlockio()
+{
+    int ret = pthread_mutex_unlock(&sys_mutexio);
+    if(ret)
+        printf("unlockio: %d\n", ret);
+}
+#else // THREADED_IO
+#ifdef TEST_LOCKING /* run standalone Pd with this to find deadlocks */
+static int amlockedio;
+void sys_lockio(void)
+{
+    if (amlockedio) bug("duplicate lockio");
+    amlockedio = 1;
+}
+
+void sys_unlock(void)
+{
+    if (!amlockedio) bug("duplicate unlockio");
+    amlockedio = 0;
+}
+#else
+void sys_lockio(void) {}
+void sys_unlockio(void) {}
+#endif
+#endif // THREADED_IO
