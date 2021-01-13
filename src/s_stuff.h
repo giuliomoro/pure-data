@@ -59,7 +59,7 @@ EXTERN void sys_register_loader(loader_t loader);
 #define SENDDACS_YES 1
 #define SENDDACS_SLEPT 2
 
-#define DEFDACBLKSIZE 64
+#define DEFDACBLKSIZE 16
 #define THREADED_IO
 extern int sys_hipriority;      /* real-time flag, true if priority boosted */
 extern int sys_schedadvance;
