@@ -79,7 +79,7 @@ typedef struct _audiosettings
 #define SENDDACS_YES 1
 #define SENDDACS_SLEPT 2
 
-#define DEFDACBLKSIZE 64
+#define DEFDACBLKSIZE 16
 #define DEFDACSAMPLERATE 48000
 
                     /* s_audio.c */
