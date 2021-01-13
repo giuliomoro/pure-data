@@ -5,6 +5,7 @@
 /* Pd side of the Pd/Pd-gui interface.  Also, some system interface routines
 that didn't really belong anywhere. */
 
+#define printf __real_printf
 #include "m_pd.h"
 #include "s_stuff.h"
 #include "m_imp.h"
@@ -1675,6 +1676,9 @@ static int sys_do_startgui(const char *libdir)
                  libdir, libdir, (getenv("HOME") ? "" : " HOME=/tmp"),
                     libdir, portno);
 #endif /* __APPLE__ */
+#ifdef THREADED_GUI_IO
+            printf("running: %s\n", cmdbuf);
+#endif // THREADED_GUI_IO
             guicmd = cmdbuf;
         }
         if (sys_verbose)
@@ -1814,7 +1818,12 @@ void sys_setrealtime(const char *libdir)
     if (sys_hipriority)
     {
         struct stat statbuf;
+#ifdef THREADED_GUI_IO
+        //HACK: TODO: remove || 1
+        if (stat(cmdbuf, &statbuf) < 0 || 1)
+#else // THREADED_GUI_IO
         if (stat(cmdbuf, &statbuf) < 0)
+#endif // THREADED_GUI_IO
         {
             fprintf(stderr,
               "disabling real-time priority due to missing pd-watchdog (%s)\n",

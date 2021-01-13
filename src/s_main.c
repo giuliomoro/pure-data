@@ -656,6 +656,7 @@ static int sys_mmio = 0;
 
 int sys_argparse(int argc, char **argv)
 {
+    sys_main_callback = 1;
     while ((argc > 0) && **argv == '-')
     {
         if (!strcmp(*argv, "-r") && argc > 1 &&
