@@ -182,6 +182,14 @@ pd_CFLAGS += -DUSEAPI_MMIO
 pd_SOURCES_core += s_audio_mmio.c
 endif
 
+##### BELA #####
+if BELA
+pd_CFLAGS += -DUSEAPI_BELA
+pd_LDADD += -lbela -lrt -lnative -lxenomai -lpthread_rt
+pd_LDFLAGS += -Wl,@/usr/xenomai/lib/posix.wrappers -L/usr/xenomai/lib
+pd_SOURCES += s_audio_bela.c
+endif
+
 ##### PortAudio #####
 if PORTAUDIO
 pd_CFLAGS += -DUSEAPI_PORTAUDIO

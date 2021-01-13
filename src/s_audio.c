@@ -386,6 +386,11 @@ void sys_close_audio(void)
         alsa_close_audio();
     else
 #endif
+#ifdef USEAPI_BELA
+    if (sys_audioapiopened == API_BELA)
+        bela_close_audio();
+    else
+#endif
 #ifdef USEAPI_MMIO
     if (sys_audioapiopened == API_MMIO)
         mmio_close_audio();
@@ -470,6 +475,21 @@ void sys_reopen_audio(void)
         outcome = alsa_open_audio(naudioindev, audioindev, naudioindev,
             chindev, naudiooutdev, audiooutdev, naudiooutdev, choutdev, rate,
                 audio_blocksize);
+    else
+#endif
+#ifdef USEAPI_BELA
+    if (sys_audioapi == API_BELA)
+	{
+        int blksize = (audio_blocksize ? audio_blocksize : 64);
+        if (sys_verbose)
+            fprintf(stderr, "blksize %d, advance %d\n", blksize, sys_advance_samples/blksize);
+        outcome = bela_open_audio((naudioindev > 0 ? chindev[0] : 0),
+        (naudiooutdev > 0 ? choutdev[0] : 0), rate, STUFF->st_soundin,
+            STUFF->st_soundout, blksize, sys_advance_samples/blksize,
+             (naudioindev > 0 ? audioindev[0] : 0),
+              (naudiooutdev > 0 ? audiooutdev[0] : 0),
+               (callback ? sched_audio_callbackfn : 0));
+    }
     else
 #endif
 #ifdef USEAPI_MMIO
@@ -560,6 +580,11 @@ int sys_send_dacs(void)
 #ifdef USEAPI_ALSA
     if (sys_audioapi == API_ALSA)
         return (alsa_send_dacs());
+    else
+#endif
+#ifdef USEAPI_BELA
+    if (sys_audioapi == API_BELA)
+        return (bela_send_dacs());
     else
 #endif
 #ifdef USEAPI_MMIO
@@ -662,6 +687,15 @@ static void audio_getdevs(char *indevlist, int *nindevs,
     {
         alsa_getdevs(indevlist, nindevs, outdevlist, noutdevs, canmulti,
             maxndev, devdescsize);
+    }
+    else
+#endif
+#ifdef USEAPI_BELA
+    if (sys_audioapi == API_BELA)
+    {
+        bela_getdevs(indevlist, nindevs, outdevlist, noutdevs, canmulti,
+            maxndev, devdescsize);
+        *cancallback = 1;
     }
     else
 #endif
@@ -903,6 +937,11 @@ void sys_listdevs(void)
         sys_listaudiodevs();
     else
 #endif
+#ifdef USEAPI_BELA
+    if (sys_audioapi == API_BELA)
+        sys_listaudiodevs();
+    else
+#endif
 #ifdef USEAPI_MMIO
     if (sys_audioapi == API_MMIO)
         sys_listaudiodevs();
@@ -952,6 +991,9 @@ void sys_set_audio_api(int which)
 #endif
 #ifdef USEAPI_ALSA
     ok += (which == API_ALSA);
+#endif
+#ifdef USEAPI_BELA
+    ok += (which == API_BELA);
 #endif
 #ifdef USEAPI_MMIO
     ok += (which == API_MMIO);
@@ -1033,6 +1075,9 @@ void sys_get_audio_apis(char *buf)
 #endif
 #ifdef USEAPI_ALSA
     sprintf(buf + strlen(buf), "{ALSA %d} ", API_ALSA); n++;
+#endif
+#ifdef USEAPI_BELA
+    sprintf(buf + strlen(buf), "{Bela %d} ", API_BELA); n++;
 #endif
 #ifdef USEAPI_PORTAUDIO
 #ifdef _WIN32
