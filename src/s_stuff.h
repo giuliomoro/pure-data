@@ -216,6 +216,7 @@ void sys_setalarm(int microsec);
 #define API_AUDIOUNIT 7
 #define API_ESD 8           /* no idea what this was, probably gone now */
 #define API_DUMMY 9
+#define API_BELA 10
 
     /* figure out which API should be the default.  The one we judge most
     likely to offer a working device takes precedence so that if you
@@ -223,7 +224,10 @@ void sys_setalarm(int microsec);
     sound.  (You'd think portaudio would be best but it seems to default
     to jack on linux, and and on Windows we only use it for ASIO).
     If nobody shows up, define DUMMY and make it the default.*/
-#if defined(USEAPI_MMIO)
+#if defined(USEAPI_BELA)
+# define API_DEFAULT API_BELA
+# define API_DEFSTRING "BELA"
+#elif defined(USEAPI_MMIO)
 # define API_DEFAULT API_MMIO
 # define API_DEFSTRING "MMIO"
 #elif defined(USEAPI_ALSA)

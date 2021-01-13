@@ -339,6 +339,13 @@ AS_IF([test x$jack_framework != xyes -a x$jack = xyes],[
         jack=no])
 ])
 
+##### BELA ####
+AC_ARG_ENABLE([bela],
+    [AS_HELP_STRING([--disable-bela], [do not use bela])], [bela=$enableval])
+AS_IF([test x$bela = xyes], [
+    AC_CHECK_LIB(bela,Bela_startAudio,BELA_LIBS=" -lbela -lrt -lnative -lxenomai -lpthread_rt -lstdc++ ",[echo "Error: libbela does not work"; exit 1;],[-lrt -lnative -lxenomai -lpthread_rt -lstdc++])])
+AM_CONDITIONAL(BELA, test x$bela = xyes)
+
 ##### MMIO #####
 AC_ARG_ENABLE([mmio],
     [AS_HELP_STRING([--disable-mmio], [do not use MMIO driver])],
