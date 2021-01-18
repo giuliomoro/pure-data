@@ -74,11 +74,17 @@ that didn't really belong anywhere. */
 #include "pthread.h"
 #endif
 
+typedef enum {
+    kFdpManagerAnyThread,
+    kFdpManagerAudioThread,
+} t_fdp_manager;
+
 typedef struct _fdpoll
 {
     int fdp_fd;
     t_fdpollfn fdp_fn;
     void *fdp_ptr;
+    t_fdp_manager fdp_manager;
 } t_fdpoll;
 
 #define INBUFSIZE 4096
@@ -138,6 +144,7 @@ void sys_set_temppath(void);
 void sys_set_extrapath(void);
 void sys_set_startup(void);
 void sys_stopgui(void);
+static void fdp_select(fd_set *readset, struct timeval timout, const t_fdp_manager manager);
 
 /* ----------- functions for timing, signals, priorities, etc  --------- */
 
@@ -193,6 +200,28 @@ double sys_getrealtime(void)
 
 extern int sys_nosleep;
 
+// perform a select() on all the pollfds with a given manager
+static void fdp_select(fd_set *readset, struct timeval timout, const t_fdp_manager manager) {
+    t_fdpoll *fp;
+    int i;
+    int count = 0;
+    FD_ZERO(readset);
+    for (fp = pd_this->pd_inter->i_fdpoll,
+        i = pd_this->pd_inter->i_nfdpoll; i--; fp++)
+    {
+        if(kFdpManagerAnyThread == manager || manager == fp->fdp_manager)
+        {
+            FD_SET(fp->fdp_fd, readset);
+            ++count;
+        }
+    }
+    if(!count)
+        return;
+    if(select(pd_this->pd_inter->i_maxfd+1,
+        readset, NULL, NULL, &timout) < 0)
+            perror("microsleep select");
+}
+
 /* sleep (but cancel the sleeping if pollem is set and any file descriptors are
 ready - in that case, dispatch any resulting Pd messages and return.  Called
 with sys_lock() set.  We will temporarily release the lock if we actually
@@ -201,30 +230,31 @@ static int sys_domicrosleep(int microsec, int pollem)
 {
     struct timeval timout;
     int i, didsomething = 0;
-    t_fdpoll *fp;
     timout.tv_sec = 0;
     timout.tv_usec = 0;
     if (pollem && pd_this->pd_inter->i_nfdpoll)
     {
-        fd_set readset, writeset, exceptset;
-        FD_ZERO(&writeset);
-        FD_ZERO(&readset);
-        FD_ZERO(&exceptset);
-        for (fp = pd_this->pd_inter->i_fdpoll,
-            i = pd_this->pd_inter->i_nfdpoll; i--; fp++)
-                FD_SET(fp->fdp_fd, &readset);
-        if(select(pd_this->pd_inter->i_maxfd+1,
-                  &readset, &writeset, &exceptset, &timout) < 0)
-          perror("microsleep select");
+        fd_set readset;
+        fdp_select(&readset, timout, kFdpManagerAudioThread);
         pd_this->pd_inter->i_fdschanged = 0;
         for (i = 0; i < pd_this->pd_inter->i_nfdpoll &&
             !pd_this->pd_inter->i_fdschanged; i++)
-                if (FD_ISSET(pd_this->pd_inter->i_fdpoll[i].fdp_fd, &readset))
         {
-            (*pd_this->pd_inter->i_fdpoll[i].fdp_fn)
-                (pd_this->pd_inter->i_fdpoll[i].fdp_ptr,
-                    pd_this->pd_inter->i_fdpoll[i].fdp_fd);
-            didsomething = 1;
+            t_fdpoll *fp = pd_this->pd_inter->i_fdpoll + i;
+            int fd = fp->fdp_fd;
+            int should_call = 0;
+            if(kFdpManagerAudioThread == fp->fdp_manager) {
+                if(FD_ISSET(fd, &readset)) {
+                    should_call = 1;
+                    didsomething = 1;
+                }
+            }
+            if(should_call)
+            {
+                (*pd_this->pd_inter->i_fdpoll[i].fdp_fn)
+                    (pd_this->pd_inter->i_fdpoll[i].fdp_ptr,
+                        pd_this->pd_inter->i_fdpoll[i].fdp_fd);
+            }
         }
         if (didsomething)
             return (1);
@@ -413,6 +443,7 @@ void sys_addpollfn(int fd, t_fdpollfn fn, void *ptr)
     fp->fdp_fd = fd;
     fp->fdp_fn = fn;
     fp->fdp_ptr = ptr;
+    fp->fdp_manager = kFdpManagerAudioThread;
     pd_this->pd_inter->i_nfdpoll = nfd + 1;
     if (fd >= pd_this->pd_inter->i_maxfd)
         pd_this->pd_inter->i_maxfd = fd + 1;
