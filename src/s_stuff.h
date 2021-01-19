@@ -195,8 +195,7 @@ EXTERN void sys_rmpollfn(int fd);
 #ifdef THREADED_IO
 #define t_rbskt struct _rbskt
 typedef void (*t_fdsendrmfn)(void *ptr);
-EXTERN void sys_addpollrb(int fd, int preserve_boundaries);
-EXTERN t_rbskt* sys_getpollrb(int fd);
+EXTERN t_rbskt sys_addpollrb(int fd, int preserve_boundaries);
 void sys_addsendfdrmfn(int sockfd, t_fdsendrmfn, void* x);
 ssize_t sys_sendto(int sockfd, const void *buf, size_t len, int flags, void* addr, size_t addrlen);
 EXTERN int rbskt_recv(t_rbskt* rbskt, char* buf, size_t length, void* nothing);

@@ -461,13 +461,14 @@ static t_fdpoll* find_fdpoll(int fd)
 }
 
 // create a rbskt associated with a given fd
-void sys_addpollrb(int fd, int preserve_boundaries)
+t_rbskt* sys_addpollrbskt(int fd, int preserve_boundaries)
 {
     t_fdpoll *fp = find_fdpoll(fd);
     rbskt_free(fp->fdp_rbskt);
     fp->fdp_rbskt = rbskt_new(preserve_boundaries);
     fp->fdp_callback_in_audio_thread = 0;
     fp->fdp_manager = kFdpManagerIoThread;
+    return fdp->fdp_rbskt;
 }
 
 // return the rbskt associated with a given fd
@@ -2020,7 +2021,7 @@ static int sys_do_startgui(const char *libdir)
         (t_fdpollfn)socketreceiver_read,
             pd_this->pd_inter->i_socketreceiver);
 #ifdef THREADED_IO
-    sys_addpollrb(pd_this->pd_inter->i_guisock, 0);
+    sys_addpollrbskt(pd_this->pd_inter->i_guisock, 0);
     sys_addsendfdrmfn(pd_this->pd_inter->i_guisock, (t_fdsendrmfn)gui_failed, NULL);
 #endif // THREADED_IO
 

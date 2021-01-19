@@ -57,6 +57,9 @@ typedef struct _netsend
     t_socketreceiver *x_receiver;
     struct sockaddr_storage x_server;
     t_float x_timeout; /* TCP connect timeout in seconds */
+#ifdef THREADED_IO
+    t_rbskt* x_rbskt;
+#endif // THREADED_IO
 } t_netsend;
 
 static t_class *netreceive_class;
@@ -118,9 +121,6 @@ static void *netsend_new(t_symbol *s, int argc, t_atom *argv)
 
 static void netsend_readbin(t_netsend *x, int fd)
 {
-#ifdef THREADED_IO
-    t_rbskt* rbskt = sys_getpollrb(fd);
-#endif // THREADED_IO
     unsigned char inbuf[INBUFSIZE];
     int ret = 0, readbytes = 0, i;
     struct sockaddr_storage fromaddr = {0};
@@ -134,7 +134,7 @@ static void netsend_readbin(t_netsend *x, int fd)
     {
 #ifdef THREADED_IO
         // TODO: retrieve fromaddr
-        ret = rbskt_recv(rbskt, (char*)inbuf, INBUFSIZE, 0);
+        ret = rbskt_recv(x->x_rbskt, (char*)inbuf, INBUFSIZE, 0);
 #else // THREADED_IO
         if (x->x_protocol == SOCK_DGRAM)
             ret = (int)recvfrom(fd, inbuf, INBUFSIZE, 0,
@@ -187,7 +187,7 @@ static void netsend_readbin(t_netsend *x, int fd)
                 return;
 #ifdef THREADED_IO
             /* check for more data available */
-            if (rbskt_bytes_available(rbskt) <= 0)
+            if (rbskt_bytes_available(x->x_rbskt) <= 0)
                 return;
 #else // THREADED_IO
             /* check for pending UDP packets */
@@ -413,7 +413,8 @@ static void netsend_connect(t_netsend *x, t_symbol *s, int argc, t_atom *argv)
         if (x->x_bin) {
             sys_addpollfn(x->x_sockfd, (t_fdpollfn)netsend_readbin, x);
 #ifdef THREADED_IO
-            sys_addpollrb(x->x_sockfd, SOCK_DGRAM == x->x_protocol);
+            x->x_rbskt = sys_addpollrbskt(x->x_sockfd,
+                                        SOCK_DGRAM == x->x_protocol);
 #endif // THREADED_IO
         }
         else
@@ -423,7 +424,8 @@ static void netsend_connect(t_netsend *x, t_symbol *s, int argc, t_atom *argv)
                                  x->x_protocol == SOCK_DGRAM);
             sys_addpollfn(x->x_sockfd, (t_fdpollfn)socketreceiver_read, y);
 #ifdef THREADED_IO
-            sys_addpollrb(x->x_sockfd, SOCK_DGRAM == x->x_protocol);
+            x->x_rbskt = sys_addpollrbskt(x->x_sockfd,
+                                        SOCK_DGRAM == x->x_protocol);
 #endif // THREADED_IO
             x->x_receiver = y;
         }
@@ -633,7 +635,8 @@ static void netreceive_connectpoll(t_netreceive *x)
         if (x->x_ns.x_bin) {
             sys_addpollfn(fd, (t_fdpollfn)netsend_readbin, x);
 #ifdef THREADED_IO
-            sys_addpollrb(fd, SOCK_DGRAM == x->x_ns.x_protocol);
+            x->x_ns.x_rbskt = sys_addpollrbskt(fd,
+                                        SOCK_DGRAM == x->x_ns.x_protocol);
 #endif // THREADED_IO
         }
         else
@@ -646,7 +649,8 @@ static void netreceive_connectpoll(t_netreceive *x)
                     (t_socketfromaddrfn)netreceive_fromaddr);
             sys_addpollfn(fd, (t_fdpollfn)socketreceiver_read, y);
 #ifdef THREADED_IO
-            sys_addpollrb(fd, SOCK_DGRAM == x->x_ns.x_protocol);
+            x->x_ns.x_rbskt = sys_addpollrbskt(fd,
+                                        SOCK_DGRAM == x->x_ns.x_protocol);
 #endif // THREADED_IO
             x->x_receivers[x->x_nconnections] = y;
         }
@@ -852,7 +856,8 @@ static void netreceive_listen(t_netreceive *x, t_symbol *s, int argc, t_atom *ar
         if (x->x_ns.x_bin) {
             sys_addpollfn(x->x_ns.x_sockfd, (t_fdpollfn)netsend_readbin, x);
 #ifdef THREADED_IO
-            sys_addpollrb(x->x_ns.x_sockfd, SOCK_DGRAM == x->x_ns.x_protocol);
+            x->x_ns.x_rbskt = sys_addpollrbskt(x->x_ns.x_sockfd,
+                                            SOCK_DGRAM == x->x_ns.x_protocol);
 #endif // THREADED_IO
         }
         else
@@ -865,7 +870,8 @@ static void netreceive_listen(t_netreceive *x, t_symbol *s, int argc, t_atom *ar
                     (t_socketfromaddrfn)netreceive_fromaddr);
             sys_addpollfn(x->x_ns.x_sockfd, (t_fdpollfn)socketreceiver_read, y);
 #ifdef THREADED_IO
-            sys_addpollrb(x->x_ns.x_sockfd, SOCK_DGRAM == x->x_ns.x_protocol);
+            x->x_ns.x_rbskt = sys_addpollrbskt(x->x_ns.x_sockfd,
+                                            SOCK_DGRAM == x->x_ns.x_protocol);
 #endif // THREADED_IO
             x->x_ns.x_connectout = 0;
             x->x_ns.x_receiver = y;
