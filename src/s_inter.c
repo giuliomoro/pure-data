@@ -77,6 +77,31 @@ that didn't really belong anywhere. */
 #ifdef THREADED_IO
 #include "ringbuffer.h"
 
+#if __STDC_VERSION__ >= 201112L // use stdatomic if C11 is available
+  #include <stdatomic.h>
+  #define SYNC_FETCH(ptr) atomic_fetch_or((_Atomic int *)ptr, 0)
+  #define SYNC_COMPARE_AND_SWAP(ptr, oldval, newval) \
+          atomic_compare_exchange_strong((_Atomic int *)ptr, &oldval, newval)
+  #define SYNC_STORE(ptr, newval) atomic_store((_Atomic int *)ptr, newval)
+#else // use platform specfics
+  #ifdef __APPLE__ // apple atomics
+    #include <libkern/OSAtomic.h>
+    #define SYNC_FETCH(ptr) OSAtomicOr32Barrier(0, (volatile uint32_t *)ptr)
+    #define SYNC_COMPARE_AND_SWAP(ptr, oldval, newval) \
+            OSAtomicCompareAndSwap32Barrier(oldval, newval, ptr)
+  #elif defined(_WIN32) || defined(_WIN64) // win api atomics
+    #include <windows.h>
+    #define SYNC_FETCH(ptr) InterlockedOr(ptr, 0)
+    #define SYNC_COMPARE_AND_SWAP(ptr, oldval, newval) \
+            InterlockedCompareExchange(ptr, oldval, newval)
+  #else // gcc atomics
+    #define SYNC_FETCH(ptr) __sync_fetch_and_or(ptr, 0)
+    #define SYNC_COMPARE_AND_SWAP(ptr, oldval, newval) \
+            __sync_val_compare_and_swap(ptr, oldval, newval)
+  #endif
+  #define SYNC_STORE(ptr, newval) SYNC_COMPARE_AND_SWAP((int*)ptr, (*(int*)ptr), newval)
+#endif
+
 typedef struct _fdsend {
     int fds_fd;
     t_fdsendrmfn fds_fn;
@@ -610,7 +635,7 @@ static void poll_fds()
             if(fp->fdp_callback_in_audio_thread)
             {
                 // temporarily transfer ownership
-                fp->fdp_manager = kFdpManagerAudioThread;
+                SYNC_STORE(&fp->fdp_manager, kFdpManagerAudioThread);
             }
             else
             {
@@ -745,7 +770,12 @@ static void fdp_select(fd_set *readset, struct timeval timout, const t_fdp_manag
     for (fp = pd_this->pd_inter->i_fdpoll,
         i = pd_this->pd_inter->i_nfdpoll; i--; fp++)
     {
-        if(kFdpManagerAnyThread == manager || manager == fp->fdp_manager)
+#ifdef THREADED_IO
+        t_fdp_manager fdp_manager = SYNC_FETCH(&(fp->fdp_manager));
+#else // THREADED_IO
+        t_fdp_manager fdp_manager = fp->fdp_manager;
+#endif // THREADED_IO
+        if(kFdpManagerAnyThread == manager || manager == fdp_manager)
         {
             FD_SET(fp->fdp_fd, readset);
             ++count;
@@ -808,7 +838,8 @@ static int sys_domicrosleep(int microsec, int pollem)
             t_fdpoll *fp = pd_this->pd_inter->i_fdpoll + i;
             int fd = fp->fdp_fd;
             int should_call = 0;
-            if(kFdpManagerAudioThread == fp->fdp_manager) {
+            t_fdp_manager fdp_manager = SYNC_FETCH(&fp->fdp_manager);
+            if(kFdpManagerAudioThread == fdp_manager) {
                 if(FD_ISSET(fd, &readset)) {
                     should_call = 1;
                     didsomething = 1;
@@ -828,7 +859,7 @@ static int sys_domicrosleep(int microsec, int pollem)
 #ifdef THREADED_IO
             // restore ownership to IO thread
             if(kFdpManagerAudioThread == fp->fdp_manager)
-               fp->fdp_manager = kFdpManagerIoThread;
+               SYNC_STORE(&fp->fdp_manager, kFdpManagerIoThread);
 #endif // THREADED_IO
         }
         if (didsomething)
