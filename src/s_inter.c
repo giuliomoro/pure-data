@@ -153,6 +153,8 @@ struct _instanceinter
     int i_nfdsend;
     t_fdsend *i_fdsend;
     ring_buffer* i_rbrmfdsend; // asynchronously report error on outbound fds
+    char* i_iothreadbuf; // used by poll_fds() and rb_dosendone() in the IO thread
+    int i_iothreadbufsize;
 #endif // THREADED_IO
 
 #ifdef _WIN32
@@ -261,6 +263,33 @@ ssize_t sys_sendto(int sockfd, const void *buf, size_t len, int flags, void* add
     return rb_sendto(pd_this->pd_inter->i_rbsend, sockfd, buf, len, flags, addr, addrlen);
 }
 
+static int iothreadbuf_resize(int newsize)
+{
+    printf("threadbuf resize %d\n", newsize);
+    char** buf = &pd_this->pd_inter->i_iothreadbuf;
+    int* size = &pd_this->pd_inter->i_iothreadbufsize;
+    if(!*buf)
+        *buf = getbytes(newsize);
+    else
+    {
+        char* tmp = (char*)resizebytes(*buf, *size, newsize);
+        if(tmp)
+            *buf = tmp;
+        else // realloc failed, size didn't change
+            return -1;
+    }
+    if(*buf)
+        *size = newsize;
+    else
+    {
+        *size = 0;
+        if(newsize)
+            return -1;
+    }
+    printf("threadbuf resize %d SUCCESS\n", newsize);
+    return 0;
+}
+
 static void gui_failed(const char* s);
 // Read one message from the ring buffer and send it to the network
 static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
@@ -269,6 +298,8 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
     int socket;
     size_t length;
     char* buf;
+    int bufsize = pd_this->pd_inter->i_iothreadbufsize;
+    int discard = 0;
     size_t addrlen;
     struct sockaddr rbaddr;
     struct sockaddr* addr;
@@ -282,24 +313,35 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
         perror("we should not be here 1");
         return -1;
     }
-    buf = (char*)malloc(length);
+    if(length > bufsize) {
+        iothreadbuf_resize(length);
+        bufsize = pd_this->pd_inter->i_iothreadbufsize;
+        // if the resize failed (it shouldn't), we may have to discard some
+        // bytes
+        discard = length > bufsize ? length - bufsize : 0;
+        length -= discard;
+        if(discard)
+            post("Discarding %d bytes from the outgoing rb\n", discard);
+    }
+    buf = pd_this->pd_inter->i_iothreadbuf; // postpone assignment till after resize
     if(rb_read_from_buffer(rb, buf, length) < 0)
     {
         perror("we should not be here 2");
-        ret = -1;
-        goto done;
+        return -1;
+    }
+    while(discard--) {
+        char c;
+        rb_read_from_buffer(rb, &c, 1);
     }
     if(rb_read_from_buffer(rb, (char*)&addrlen, sizeof(addrlen)) < 0)
     {
         perror("we should not be here 3");
-        ret = -1;
-        goto done;
+        return -1;
     }
     if(rb_read_from_buffer(rb, (char*)&rbaddr, addrlen) < 0)
     {
         perror("we should not be here 4");
-        ret = -1;
-        goto done;
+        return -1;
     }
     int flags = 0;
 #if 0 // turns out this is not portable
@@ -327,8 +369,6 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
                 gui_failed("pd-to-gui socket");
         }
     }
-done:
-    free(buf);
     return ret;
 }
 
@@ -550,8 +590,8 @@ void sys_addsendfdrmfn(int fd, t_fdsendrmfn fn, void* ptr)
 //  at every call, but only when data is actually available.
 static void poll_fds()
 {
-    const unsigned int maxRecv = INBUFSIZE;
-    char* buf = NULL;
+    const unsigned int bufsize = pd_this->pd_inter->i_iothreadbufsize;
+    char* buf;
     ssize_t ret;
     struct timeval timout = {0}; // making this timeout longer would be more efficient (by avoiding spurious wakeups), but it would needlessly postpone writes
     int pollem = 1;
@@ -570,18 +610,19 @@ static void poll_fds()
             }
             else
             {
-                if(!buf)
-                    buf = (char*)malloc(maxRecv);
                 int fd = fp->fdp_fd;
                 t_rbskt* rbskt = fp->fdp_rbskt;
                 ring_buffer* rb = rbskt->rs_rb;
                 unsigned int size = rb_available_to_write(rb);
-                size = size > maxRecv ? maxRecv : size;
-                // TODO: handle case where there is not enough space available in
-                // the buffer. What is causing it? Too much data available or too
-                // much data left in the rb because the other thread hasn't
-                // processed it yet?
-
+                if(size > bufsize) {
+                    if(iothreadbuf_resize(size))
+                    {
+                        size = bufsize;
+                        if(rbskt->rs_preserve_boundaries)
+                            post("Incomplete packet received\n");
+                    }
+                }
+                char* buf = pd_this->pd_inter->i_iothreadbuf;
                 // we adapted socketreceiver_read and netsend_readbin to use
                 // rb_recv instead of recv. So here we are only reading from the
                 // socket and making the data available through rb_recv
@@ -2220,6 +2261,9 @@ void s_inter_newpdinstance(void)
     pthread_mutex_init(&pd_this->pd_inter->i_mutex, NULL);
     pd_this->pd_islocked = 0;
 #endif
+#ifdef THREADED_IO
+    iothreadbuf_resize(INBUFSIZE);
+#endif // THREADED_IO
 #ifdef _WIN32
     pd_this->pd_inter->i_freq = 0;
 #endif
@@ -2237,6 +2281,8 @@ void s_inter_free(t_instanceinter *inter)
         inter->i_nfdpoll = 0;
     }
 #ifdef THREADED_IO
+    t_freebytes(pd_this->pd_inter->i_iothreadbuf,
+        pd_this->pd_inter->i_iothreadbufsize);
     t_freebytes(pd_this->pd_inter->i_fdsend,
         pd_this->pd_inter->i_nfdsend * sizeof(t_fdsend));
     rb_free(pd_this->pd_inter->i_rbrmfdsend);
