@@ -176,7 +176,6 @@ void sys_stopgui(void);
 void sys_lockio();
 void sys_unlockio();
 static void fdp_select(fd_set *readset, struct timeval timout, const t_fdp_manager manager);
-static t_fdpoll* fdp_ready_next(fd_set *readset);
 
 #ifdef THREADED_IO
 #define RB_SIZE (8*INBUFSIZE)
@@ -594,14 +593,20 @@ static void poll_fds()
     ssize_t ret;
     struct timeval timout = {0}; // making this timeout longer would be more efficient (by avoiding spurious wakeups), but it would needlessly postpone writes
     int pollem = 1;
+    int i;
     t_fdpoll *fp;
     if (pollem && pd_this->pd_inter->i_nfdpoll)
     {
         fd_set readset;
         fdp_select(&readset, timout, kFdpManagerIoThread);
-        int count = 0;
-        while((fp = fdp_ready_next(&readset)))
+        for (i = 0; i < pd_this->pd_inter->i_nfdpoll; i++)
         {
+            t_fdpoll *fp = pd_this->pd_inter->i_fdpoll + i;
+            int fd = fp->fdp_fd;
+            if(fp->fdp_manager != kFdpManagerIoThread)
+                continue;
+            if(!FD_ISSET(fd, &readset))
+                continue;
             if(fp->fdp_callback_in_audio_thread)
             {
                 // temporarily transfer ownership
@@ -751,24 +756,6 @@ static void fdp_select(fd_set *readset, struct timeval timout, const t_fdp_manag
     if(select(pd_this->pd_inter->i_maxfd+1,
         readset, NULL, NULL, &timout) < 0)
             perror("microsleep select");
-}
-
-// helper to iterate through the ISSET fds in readset and return the next one
-// that is ready. It modifies readset by clearing the corresponding fd
-static t_fdpoll* fdp_ready_next(fd_set *readset) {
-    t_fdpoll *fp;
-    int fd;
-    for(fp = pd_this->pd_inter->i_fdpoll;
-            fp < pd_this->pd_inter->i_fdpoll + pd_this->pd_inter->i_nfdpoll;
-            fp++)
-    {
-        fd = fp->fdp_fd;
-        if(FD_ISSET(fd, readset)) {
-                FD_CLR(fd, readset);
-                return fp;
-        }
-    }
-    return NULL;
 }
 
 /* sleep (but cancel the sleeping if pollem is set and any file descriptors are
