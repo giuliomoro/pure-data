@@ -234,7 +234,7 @@ static ssize_t rb_sendto(ring_buffer* rb, int socket, const void *buffer, size_t
     size_t actualLength = desiredLength <= maxLength ? desiredLength : maxLength;
     if(actualLength < desiredLength)
     {
-        perror("rb buffer is full, sending packet from the audio thread");
+        error("rb buffer is full, sending packet from the audio thread");
         sendrb_flush(rb, 1);
         // then send out the new data
         return sendto(socket, buffer, length, 0, addr, addrlen);
@@ -310,7 +310,7 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
     }
     if(rb_read_from_buffer(rb, (char*)&length, sizeof(length)) < 0)
     {
-        perror("we should not be here 1");
+        error("we should not be here 1");
         return -1;
     }
     if(length > bufsize) {
@@ -321,12 +321,12 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
         discard = length > bufsize ? length - bufsize : 0;
         length -= discard;
         if(discard)
-            post("Discarding %d bytes from the outgoing rb\n", discard);
+            error("Discarding %d bytes from the outgoing rb", discard);
     }
     buf = pd_this->pd_inter->i_iothreadbuf; // postpone assignment till after resize
     if(rb_read_from_buffer(rb, buf, length) < 0)
     {
-        perror("we should not be here 2");
+        error("we should not be here 2");
         return -1;
     }
     while(discard--) {
@@ -335,12 +335,12 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
     }
     if(rb_read_from_buffer(rb, (char*)&addrlen, sizeof(addrlen)) < 0)
     {
-        perror("we should not be here 3");
+        error("we should not be here 3");
         return -1;
     }
     if(rb_read_from_buffer(rb, (char*)&rbaddr, addrlen) < 0)
     {
-        perror("we should not be here 4");
+        error("we should not be here 4");
         return -1;
     }
     int flags = 0;
@@ -431,7 +431,7 @@ static int rbsend_init()
         pd_this->pd_inter->i_rbsend = rb_create(8 * RB_SIZE);
     if(!pd_this->pd_inter->i_rbsend)
     {
-        perror("unable to create ring buffer for outgoing network packets");
+        error("unable to create ring buffer for outgoing network packets");
         return -1;
     }
     return 0;
@@ -489,7 +489,7 @@ int rb_recv(t_rbskt* rbskt, char* buf, size_t buflen, void* nothing)
             return 0;
         if((ret = rb_read_from_buffer(rb, (char*)&msglen, sizeof(msglen))))
         {
-            perror("Error while reading from ring_buffer in rb_recv: couldn't read from rb");
+            error("Error while reading from ring_buffer in rb_recv: couldn't read from rb");
             errno = EPERM;
             return -1;
         }
@@ -518,7 +518,7 @@ int rb_recv(t_rbskt* rbskt, char* buf, size_t buflen, void* nothing)
     if(available < msglen) {
         printf("%p msglen: %ld available: %d\n", rb, msglen, available);
         errno = EPERM;
-        perror("Error while reading from ring_buffer in rb_recv: not enough data in rb");
+        error("Error while reading from ring_buffer in rb_recv: not enough data in rb");
         return -1;
     }
     // only request as many bytes as we can store if they are available
@@ -527,7 +527,7 @@ int rb_recv(t_rbskt* rbskt, char* buf, size_t buflen, void* nothing)
     if(ret)
     {
         errno = EPERM;
-        perror("Error while reading from ring_buffer in rb_recv");
+        error("Error while reading from ring_buffer in rb_recv");
         return -1;
     }
     if(msglen > buflen) {
@@ -649,7 +649,7 @@ static void poll_fds()
                         // everything OK, let's send the data
                         ret = rb_write_to_buffer(rb, 1, buf, size);
                         if(ret)
-                            post("error while writing to ring buffer for fd %d\n", fd);
+                            error("error while writing to ring buffer for fd %d\n", fd);
                     }
                 }
             }
