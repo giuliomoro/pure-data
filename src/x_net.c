@@ -134,7 +134,7 @@ static void netsend_readbin(t_netsend *x, int fd)
     {
 #ifdef THREADED_IO
         // TODO: retrieve fromaddr
-        ret = rb_recv(rbskt, (char*)inbuf, INBUFSIZE, 0);
+        ret = rbskt_recv(rbskt, (char*)inbuf, INBUFSIZE, 0);
 #else // THREADED_IO
         if (x->x_protocol == SOCK_DGRAM)
             ret = (int)recvfrom(fd, inbuf, INBUFSIZE, 0,

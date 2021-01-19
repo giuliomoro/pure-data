@@ -199,7 +199,7 @@ EXTERN void sys_addpollrb(int fd, int preserve_boundaries);
 EXTERN t_rbskt* sys_getpollrb(int fd);
 void sys_addsendfdrmfn(int sockfd, t_fdsendrmfn, void* x);
 ssize_t sys_sendto(int sockfd, const void *buf, size_t len, int flags, void* addr, size_t addrlen);
-EXTERN int rb_recv(t_rbskt* rbskt, char* buf, size_t length, void* nothing);
+EXTERN int rbskt_recv(t_rbskt* rbskt, char* buf, size_t length, void* nothing);
 EXTERN int rbskt_bytes_available(t_rbskt* rbskt);
 #endif // THREADED_IO
 #if defined(USEAPI_OSS) || defined(USEAPI_ALSA)
