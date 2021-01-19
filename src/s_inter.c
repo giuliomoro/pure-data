@@ -477,7 +477,7 @@ t_rbskt* sys_getpollrb(int fd)
     return fp->fdp_rbskt;
 }
 
-int rb_recv(t_rbskt* rbskt, char* buf, size_t buflen, void* nothing)
+int rbskt_recv(t_rbskt* rbskt, char* buf, size_t buflen, void* nothing)
 {
     ring_buffer* rb = rbskt->rs_rb;
     int ret;
@@ -489,7 +489,7 @@ int rb_recv(t_rbskt* rbskt, char* buf, size_t buflen, void* nothing)
             return 0;
         if((ret = rb_read_from_buffer(rb, (char*)&msglen, sizeof(msglen))))
         {
-            error("Error while reading from ring_buffer in rb_recv: couldn't read from rb");
+            error("Error while reading from ring_buffer in rbskt_recv: couldn't read from rb");
             errno = EPERM;
             return -1;
         }
@@ -518,7 +518,7 @@ int rb_recv(t_rbskt* rbskt, char* buf, size_t buflen, void* nothing)
     if(available < msglen) {
         printf("%p msglen: %ld available: %d\n", rb, msglen, available);
         errno = EPERM;
-        error("Error while reading from ring_buffer in rb_recv: not enough data in rb");
+        error("Error while reading from ring_buffer in rbskt_recv: not enough data in rb");
         return -1;
     }
     // only request as many bytes as we can store if they are available
@@ -527,7 +527,7 @@ int rb_recv(t_rbskt* rbskt, char* buf, size_t buflen, void* nothing)
     if(ret)
     {
         errno = EPERM;
-        error("Error while reading from ring_buffer in rb_recv");
+        error("Error while reading from ring_buffer in rbskt_recv");
         return -1;
     }
     if(msglen > buflen) {
@@ -624,8 +624,8 @@ static void poll_fds()
                 }
                 char* buf = pd_this->pd_inter->i_iothreadbuf;
                 // we adapted socketreceiver_read and netsend_readbin to use
-                // rb_recv instead of recv. So here we are only reading from the
-                // socket and making the data available through rb_recv
+                // rbskt_recv instead of recv. So here we are only reading from the
+                // socket and making the data available through rbskt_recv
                 ret = recv(fd, buf, size, 0);
                 if(ret < 0)
                 {
@@ -1153,7 +1153,7 @@ static void socketreceiver_getudp(t_socketreceiver *x, int fd)
     while (1)
     {
 #ifdef THREADED_IO
-        ret = rb_recv(rbskt, buf, INBUFSIZE, 0);
+        ret = rbskt_recv(rbskt, buf, INBUFSIZE, 0);
         // TODO: retrieve fromaddr
         x->sr_fromaddr = NULL;
         fromaddrlen = 0;
@@ -1248,7 +1248,7 @@ void socketreceiver_read(t_socketreceiver *x, int fd)
         else
         {
 #ifdef THREADED_IO
-            ret = rb_recv(sys_getpollrb(fd), x->sr_inbuf + x->sr_inhead,
+            ret = rbskt_recv(sys_getpollrb(fd), x->sr_inbuf + x->sr_inhead,
                 readto - x->sr_inhead, 0);
 #else // THREADED_IO
             ret = (int)recv(fd, x->sr_inbuf + x->sr_inhead,
