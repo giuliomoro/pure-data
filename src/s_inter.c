@@ -828,9 +828,10 @@ static int sys_domicrosleep(int microsec, int pollem)
                 }
             }
         }
-#endif // THREADED_IO
+#else // THREADED_IO
         fd_set readset;
         fdp_select(&readset, timout, kFdpManagerAudioThread);
+#endif // THREADED_IO
         pd_this->pd_inter->i_fdschanged = 0;
         for (i = 0; i < pd_this->pd_inter->i_nfdpoll &&
             !pd_this->pd_inter->i_fdschanged; i++)
@@ -838,18 +839,23 @@ static int sys_domicrosleep(int microsec, int pollem)
             t_fdpoll *fp = pd_this->pd_inter->i_fdpoll + i;
             int fd = fp->fdp_fd;
             int should_call = 0;
+#ifdef THREADED_IO
             t_fdp_manager fdp_manager = SYNC_FETCH(&fp->fdp_manager);
             if(kFdpManagerAudioThread == fdp_manager) {
+                should_call = 1;
+                didsomething = 1;
+            } else {
+                if(rbskt_ready(fp->fdp_rbskt))
+                    should_call = 1;
+            }
+#else // THREADED_IO
+            if(kFdpManagerAudioThread == fp->fdp_manager) {
                 if(FD_ISSET(fd, &readset)) {
                     should_call = 1;
                     didsomething = 1;
                 }
-            } else {
-#ifdef THREADED_IO
-                if(rbskt_ready(fp->fdp_rbskt))
-                    should_call = 1;
-#endif // THREADED_IO
             }
+#endif // THREADED_IO
             if(should_call)
             {
                 (*pd_this->pd_inter->i_fdpoll[i].fdp_fn)
