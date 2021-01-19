@@ -591,7 +591,6 @@ void sys_addsendfdrmfn(int fd, t_fdsendrmfn fn, void* ptr)
 static void poll_fds()
 {
     const unsigned int bufsize = pd_this->pd_inter->i_iothreadbufsize;
-    char* buf;
     ssize_t ret;
     struct timeval timout = {0}; // making this timeout longer would be more efficient (by avoiding spurious wakeups), but it would needlessly postpone writes
     int pollem = 1;
@@ -655,7 +654,6 @@ static void poll_fds()
             }
         }
     }
-    free(buf);
 }
 
 // call this from a non-real-time thread to process IO
