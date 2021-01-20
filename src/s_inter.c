@@ -868,11 +868,19 @@ static int sys_domicrosleep(int microsec, int pollem)
             !pd_this->pd_inter->i_fdschanged; i++)
         {
             t_fdpoll *fp = pd_this->pd_inter->i_fdpoll + i;
+            int fd = fp->fdp_fd;
+            // IMPORTANT: this fp is invalidated if i_fdschanged becomes ture
+            //after callpollfn().
 #ifdef THREADED_IO
             t_fdp_manager fdp_manager = SYNC_FETCH(&fp->fdp_manager);
             if(kFdpManagerAudioThread == fdp_manager) {
                 callpollfn(i);
                 didsomething = 1;
+                if(pd_this->pd_inter->i_fdschanged)
+                {
+                    // grab a fresh pointer
+                    fp = find_fdpoll(fd);
+                }
                 // restore ownership to IO thread
                SYNC_STORE(&fp->fdp_manager, kFdpManagerIoThread);
             } else {
