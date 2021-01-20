@@ -10,6 +10,7 @@ that didn't really belong anywhere. */
 #include "m_imp.h"
 #include "g_canvas.h"   /* for GUI queueing stuff */
 #include "s_net.h"
+#define NET_MAXBUFSIZE 65536 // while waiting for 2c3ed7cf82336141619f6981a1b2127820aa0785 to be merged
 #include <errno.h>
 #ifndef _WIN32
 #include <unistd.h>
@@ -134,6 +135,7 @@ typedef struct _fdpoll
 #endif // THREADED_IO
 } t_fdpoll;
 
+#define GUI_ALLOCCHUNK 8192
 #define INBUFSIZE 4096
 
 struct _socketreceiver
@@ -208,7 +210,22 @@ void sys_unlockio();
 static void fdp_select(fd_set *readset, struct timeval timout, const t_fdp_manager manager);
 
 #ifdef THREADED_IO
-#define RB_SIZE (8*INBUFSIZE)
+
+#define IOTHREADBUF_SIZE (NET_MAXBUFSIZE) // temp buffer used by IO thread. Must be large enough for largest UDP packet
+
+#define RBSKT_SIZE (8 * NET_MAXBUFSIZE) // rb for each incoming socket
+#define RBRMFDSEND_SIZE 1024 // a small ring buffer for returning failed fds
+#define RBSEND_SIZE (8 * NET_MAXBUFSIZE) // single outgoing rb for all outgoing sockets
+#define GUIBUF_RB_SIZE (8 * GUI_ALLOCCHUNK) // gui outgoing rb
+
+#if __STDC_VERSION__ >= 201112L
+#define ASSERT_POW2(N) _Static_assert(N && !(N & (N - 1)), "Not a power of two")
+ASSERT_POW2(RBSKT_SIZE);
+ASSERT_POW2(GUIBUF_RB_SIZE);
+ASSERT_POW2(RBSEND_SIZE);
+ASSERT_POW2(RBRMFDSEND_SIZE);
+#endif // C11
+
 static void rb_dosend(ring_buffer*, int ignoreSigFd);
 static int rbsend_init();
 struct _rbskt { // t_rbskt
@@ -220,7 +237,7 @@ struct _rbskt { // t_rbskt
 
 static t_rbskt* rbskt_new(int preserve_boundaries) {
     t_rbskt* x = (t_rbskt*)getbytes(sizeof(*x));
-    x->rs_rb = rb_create(RB_SIZE);
+    x->rs_rb = rb_create(RBSKT_SIZE);
     x->rs_preserve_boundaries = preserve_boundaries;
     x->rs_errno = 0;
     x->rs_closed = 0;
@@ -292,33 +309,6 @@ ssize_t sys_sendto(int sockfd, const void *buf, size_t len, int flags, void* add
     return rb_sendto(pd_this->pd_inter->i_rbsend, sockfd, buf, len, flags, addr, addrlen);
 }
 
-static int iothreadbuf_resize(int newsize)
-{
-    printf("threadbuf resize %d\n", newsize);
-    char** buf = &pd_this->pd_inter->i_iothreadbuf;
-    int* size = &pd_this->pd_inter->i_iothreadbufsize;
-    if(!*buf)
-        *buf = getbytes(newsize);
-    else
-    {
-        char* tmp = (char*)resizebytes(*buf, *size, newsize);
-        if(tmp)
-            *buf = tmp;
-        else // realloc failed, size didn't change
-            return -1;
-    }
-    if(*buf)
-        *size = newsize;
-    else
-    {
-        *size = 0;
-        if(newsize)
-            return -1;
-    }
-    printf("threadbuf resize %d SUCCESS\n", newsize);
-    return 0;
-}
-
 static void gui_failed(const char* s);
 // Read one message from the ring buffer and send it to the network
 static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
@@ -326,7 +316,7 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
     int ret;
     int socket;
     size_t length;
-    char* buf;
+    char* buf = pd_this->pd_inter->i_iothreadbuf;
     int bufsize = pd_this->pd_inter->i_iothreadbufsize;
     int discard = 0;
     size_t addrlen;
@@ -342,17 +332,14 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
         error("we should not be here 1");
         return -1;
     }
-    if(length > bufsize) {
-        iothreadbuf_resize(length);
-        bufsize = pd_this->pd_inter->i_iothreadbufsize;
-        // if the resize failed (it shouldn't), we may have to discard some
-        // bytes
-        discard = length > bufsize ? length - bufsize : 0;
-        length -= discard;
-        if(discard)
-            error("Discarding %d bytes from the outgoing rb", discard);
+    if(length > bufsize)
+    {
+        // this should never happen  as i_iothreadbufsize should be chosen to be
+        // larger than any possible incoming packet
+        discard = length - bufsize;
+        fprintf(stderr, "Discarding %d bytes from the outgoing rb. The packet was %zu bytes\n", discard, length);
+        length = bufsize;
     }
-    buf = pd_this->pd_inter->i_iothreadbuf; // postpone assignment till after resize
     if(rb_read_from_buffer(rb, buf, length) < 0)
     {
         error("we should not be here 2");
@@ -457,7 +444,7 @@ void sys_stopiothread()
 static int rbsend_init()
 {
     if(!pd_this->pd_inter->i_rbsend)
-        pd_this->pd_inter->i_rbsend = rb_create(8 * RB_SIZE);
+        pd_this->pd_inter->i_rbsend = rb_create(RBSEND_SIZE);
     if(!pd_this->pd_inter->i_rbsend)
     {
         error("unable to create ring buffer for outgoing network packets");
@@ -469,7 +456,7 @@ static int rbsend_init()
 static int rbrmfdsend_init()
 {
     if(!pd_this->pd_inter->i_rbrmfdsend)
-        pd_this->pd_inter->i_rbrmfdsend = rb_create(4096);
+        pd_this->pd_inter->i_rbrmfdsend = rb_create(RBRMFDSEND_SIZE);
     if(!pd_this->pd_inter->i_rbrmfdsend)
     {
         perror("unable to create ring buffer for failed fds");
@@ -619,6 +606,7 @@ void sys_addsendfdrmfn(int fd, t_fdsendrmfn fn, void* ptr)
 //  at every call, but only when data is actually available.
 static void poll_fds()
 {
+    char* buf = pd_this->pd_inter->i_iothreadbuf;
     const unsigned int bufsize = pd_this->pd_inter->i_iothreadbufsize;
     ssize_t ret;
     struct timeval timout = {0}; // making this timeout longer would be more efficient (by avoiding spurious wakeups), but it would needlessly postpone writes
@@ -648,15 +636,6 @@ static void poll_fds()
                 t_rbskt* rbskt = fp->fdp_rbskt;
                 ring_buffer* rb = rbskt->rs_rb;
                 unsigned int size = rb_available_to_write(rb);
-                if(size > bufsize) {
-                    if(iothreadbuf_resize(size))
-                    {
-                        size = bufsize;
-                        if(rbskt->rs_preserve_boundaries)
-                            post("Incomplete packet received\n");
-                    }
-                }
-                char* buf = pd_this->pd_inter->i_iothreadbuf;
                 // we adapted socketreceiver_read and netsend_readbin to use
                 // rbskt_recv instead of recv. So here we are only reading from the
                 // socket and making the data available through rbskt_recv
@@ -1350,7 +1329,6 @@ void sys_closesocket(int sockfd)
 }
 
 /* ---------------------- sending messages to the GUI ------------------ */
-#define GUI_ALLOCCHUNK 8192
 #define GUI_UPDATESLICE 512 /* how much we try to do in one idle period */
 #define GUI_BYTESPERPING 1024 /* how much we send up per ping */
 
@@ -1440,7 +1418,7 @@ void sys_vgui(const char *fmt, ...)
     }
 #ifdef THREADED_IO
     if (!pd_this->pd_inter->i_guibuf_rb)
-        pd_this->pd_inter->i_guibuf_rb = rb_create(GUI_ALLOCCHUNK * 8);
+        pd_this->pd_inter->i_guibuf_rb = rb_create(GUIBUF_RB_SIZE);
 #endif // THREADED_IO
     if (pd_this->pd_inter->i_guihead > pd_this->pd_inter->i_guisize -
         (GUI_ALLOCCHUNK/2))
@@ -2285,7 +2263,8 @@ void s_inter_newpdinstance(void)
     pd_this->pd_islocked = 0;
 #endif
 #ifdef THREADED_IO
-    iothreadbuf_resize(INBUFSIZE);
+    pd_this->pd_inter->i_iothreadbufsize = IOTHREADBUF_SIZE;
+    pd_this->pd_inter->i_iothreadbuf = getbytes(pd_this->pd_inter->i_iothreadbufsize);
 #endif // THREADED_IO
 #ifdef _WIN32
     pd_this->pd_inter->i_freq = 0;
