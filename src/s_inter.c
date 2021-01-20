@@ -296,17 +296,17 @@ static ssize_t rb_sendto(ring_buffer** rb, int socket, const void *buffer, size_
     size_t actualLength = desiredLength <= maxLength ? desiredLength : maxLength;
     if(actualLength < desiredLength)
     {
-        error("rb buffer is full, sending packet from the audio thread");
+        post("rb buffer is full, sending packet from the audio thread");
         sendrb_flush_and_resize(rb, 1, 2);
         // then send out the new data
         return sendto(socket, buffer, length, 0, addr, addrlen);
     }
     rb_write_to_buffer(*rb, 5,
             (char*)&socket, sizeof(socket),
-            (char*)&length, sizeof(length),
-            buffer, length,
             (char*)&addrlen, sizeof(addrlen),
-            addr, addrlen
+            addr, addrlen,
+            (char*)&length, sizeof(length),
+            buffer, length
         );
     return actualLength;
 }
@@ -331,10 +331,9 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
 {
     int ret;
     int socket;
-    size_t length;
+    size_t length, totallength;
     char* buf = pd_this->pd_inter->i_iothreadbuf;
     int bufsize = pd_this->pd_inter->i_iothreadbufsize;
-    int discard = 0;
     size_t addrlen;
     struct sockaddr rbaddr;
     struct sockaddr* addr;
@@ -343,48 +342,64 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
         // no message to retrieve
         return 0;
     }
-    if(rb_read_from_buffer(rb, (char*)&length, sizeof(length)) < 0)
+    if(rb_read_from_buffer(rb, (char*)&addrlen, sizeof(addrlen)) < 0)
     {
         error("we should not be here 1");
         return -1;
     }
-    if(length > bufsize)
-    {
-        // this should never happen  as i_iothreadbufsize should be chosen to be
-        // larger than any possible incoming packet
-        discard = length - bufsize;
-        fprintf(stderr, "Discarding %d bytes from the outgoing rb. The packet was %zu bytes\n", discard, length);
-        length = bufsize;
-    }
-    if(rb_read_from_buffer(rb, buf, length) < 0)
+    if(rb_read_from_buffer(rb, (char*)&rbaddr, addrlen) < 0)
     {
         error("we should not be here 2");
         return -1;
     }
-    while(discard--) {
-        char c;
-        rb_read_from_buffer(rb, &c, 1);
-    }
-    if(rb_read_from_buffer(rb, (char*)&addrlen, sizeof(addrlen)) < 0)
+    if(rb_read_from_buffer(rb, (char*)&totallength, sizeof(length)) < 0)
     {
         error("we should not be here 3");
         return -1;
     }
-    if(rb_read_from_buffer(rb, (char*)&rbaddr, addrlen) < 0)
-    {
-        error("we should not be here 4");
-        return -1;
-    }
+    if(addrlen)
+        addr = &rbaddr;
+    else
+        addr = NULL;
     int flags = 0;
 #ifdef MSG_NOSIGNAL
     if(ignoreSigFd == socket)
         flags = MSG_NOSIGNAL;
 #endif // MSG_NOSIGNAL
-    if(addrlen)
-        addr = &rbaddr;
-    else
-        addr = NULL;
-    ret = sendto(socket, buf, length, flags, addr, addrlen);
+    ret = 0;
+    int failed = 0;
+    length = totallength;
+    while(length)
+    {
+        // the only case in which length > bufsize is for a TCP packet (because
+        // i_iothreadbufsize should be at least as large as the largest UDP
+        // packet), so it's fine to split the outgoing data at arbitrary
+        // points.
+        // We do split readings from the ring buffer and send data out as we
+        // retrieve it.
+        int toread = bufsize < length ? bufsize : length;
+        if(rb_read_from_buffer(rb, buf, toread) < 0)
+        {
+            error("we should not be here 4");
+            return -1;
+        }
+        int sent = 0;
+        while(!failed && sent != toread) {
+            // sendto() may not accept all our data at once, so we may have to
+            // do multiple writes here
+            ret = sendto(socket, buf, toread, flags, addr, addrlen);
+            if(ret < 0)
+                ++failed;
+            else
+                sent += ret;
+        }
+        // even if the socket fails at some point, we need to keep reading from
+        // the ring buffer to leave it in a consistent state
+        if(1 == failed)
+            error("Error on outgoing socket. Discarding %zu bytes of an"
+                    "outgoing packet of size %zu\n", length, totallength);
+        length -= toread;
+    }
     if (ret < 0)
     {
         // if it wasn't ignored, the program would crash in sendto()
