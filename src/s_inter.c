@@ -119,6 +119,7 @@ enum _fdp_manager {
     kFdpManagerAudioThread,
 #ifdef THREADED_IO
     kFdpManagerIoThread,
+    kFdpManagerIoThreadHiPriority,
 #endif // THREADED_IO
 };
 #ifdef THREADED_IO
@@ -211,7 +212,7 @@ void sys_set_startup(void);
 void sys_stopgui(void);
 void sys_lockio();
 void sys_unlockio();
-static void fdp_select(fd_set *readset, struct timeval timout, const t_fdp_manager manager);
+static int fdp_select(fd_set *readset, struct timeval timout, const t_fdp_manager manager);
 
 #ifdef THREADED_IO
 
@@ -621,7 +622,11 @@ static int poll_fds()
     if (pd_this->pd_inter->i_nfdpoll)
     {
         fd_set readset;
-        fdp_select(&readset, timout, kFdpManagerIoThread);
+        int sel = fdp_select(&readset, timout, kFdpManagerIoThreadHiPriority);
+        if(0 == sel)
+            sel = fdp_select(&readset, timout, kFdpManagerIoThread);
+        if(sel <= 0)
+            return 0;
         for (i = 0; i < pd_this->pd_inter->i_nfdpoll; i++)
         {
             t_fdpoll *fp = pd_this->pd_inter->i_fdpoll + i;
@@ -637,10 +642,32 @@ static int poll_fds()
             }
             else
             {
+                if(kFdpManagerIoThreadHiPriority == fp->fdp_manager)
+                    fp->fdp_manager = kFdpManagerIoThread;
                 int fd = fp->fdp_fd;
                 t_rbskt* rbskt = fp->fdp_rbskt;
                 ring_buffer* rb = rbskt->rs_rb;
                 unsigned int size = rb_available_to_write(rb);
+                if(0 == size
+                    || (rbskt->rs_preserve_boundaries
+                        && socket_bytes_available(fd) > size))
+                {
+                    // not enough space in the ring buffer: let's postpone
+                    // recv() while the audio thread empties the ringbuffer
+                    fprintf(stderr, "Throttling read on fd %d\n", fd);
+                    // by raising the priority of the fd, we ensure that this
+                    // socket doesn't "starve" for a long time (e.g.: if
+                    // other sockets would be continuously keeping the ring
+                    // buffer almost full).
+
+                    // no need for atomic store: we already "acquired" it
+                    // in fdp_select() and this is a flag for this same
+                    // thread
+                    fp->fdp_manager = kFdpManagerIoThreadHiPriority;
+                    // return 0 to encourage the calling thread to sleep
+                    // before calling again
+                    return 0;
+                }
                 // we adapted socketreceiver_read and netsend_readbin to use
                 // rbskt_recv instead of recv. So here we are only reading from the
                 // socket and making the data available through rbskt_recv
@@ -756,10 +783,12 @@ double sys_getrealtime(void)
 extern int sys_nosleep;
 
 // perform a select() on all the pollfds with a given manager
-static void fdp_select(fd_set *readset, struct timeval timout, const t_fdp_manager manager) {
+// returns the number of fds that were ready, or a negative value if an error occurred.
+static int fdp_select(fd_set *readset, struct timeval timout, const t_fdp_manager manager) {
     t_fdpoll *fp;
     int i;
     int count = 0;
+    int ret;
     FD_ZERO(readset);
     for (fp = pd_this->pd_inter->i_fdpoll,
         i = pd_this->pd_inter->i_nfdpoll; i--; fp++)
@@ -776,10 +805,11 @@ static void fdp_select(fd_set *readset, struct timeval timout, const t_fdp_manag
         }
     }
     if(!count)
-        return;
-    if(select(pd_this->pd_inter->i_maxfd+1,
-        readset, NULL, NULL, &timout) < 0)
+        return 0;
+    if((ret = select(pd_this->pd_inter->i_maxfd+1,
+        readset, NULL, NULL, &timout)) < 0)
             perror("microsleep select");
+    return ret;
 }
 
 static void callpollfn(int i)
