@@ -47,4 +47,10 @@ int rb_write_to_buffer(ring_buffer *buffer, int n, ...);
 /// returns 0 on success
 int rb_read_from_buffer(ring_buffer *buffer, char *dest, int len);
 
+/// resize the internal buffer and copy up to newsize-1 of the existing data to
+/// the new buffer
+/// note: call this while reads and writes are not taking place
+/// returns 0 on success
+int rb_resize(ring_buffer* rb, int newsize);
+
 #endif

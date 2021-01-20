@@ -220,8 +220,8 @@ static int fdp_select(fd_set *readset, struct timeval timout, const t_fdp_manage
 
 #define RBSKT_SIZE (8 * NET_MAXBUFSIZE) // rb for each incoming socket
 #define RBRMFDSEND_SIZE 1024 // a small ring buffer for returning failed fds
-#define RBSEND_SIZE (8 * NET_MAXBUFSIZE) // single outgoing rb for all outgoing sockets
-#define GUIBUF_RB_SIZE (8 * GUI_ALLOCCHUNK) // gui outgoing rb
+#define RBSEND_SIZE (8 * NET_MAXBUFSIZE) // single outgoing rb for all outgoing sockets. May be resized at runtime if it fills up
+#define GUIBUF_RB_SIZE (8 * GUI_ALLOCCHUNK) // gui outgoing rb. May be resized at runtime if it fills up
 
 #if __STDC_VERSION__ >= 201112L
 #define ASSERT_POW2(N) _Static_assert(N && !(N & (N - 1)), "Not a power of two")
@@ -269,29 +269,26 @@ int rbskt_bytes_available(t_rbskt* rbskt) {
 // ringbuffer first
 // should_lock should be set to true if this is not called from the IO thread
 // for mult > 1 reallocate the buffer to a multiple of the current size
-static void sendrb_flush_and_resize(ring_buffer** rb, int should_lock, int mult)
+static void sendrb_flush_and_resize(ring_buffer* rb, int should_lock, int mult)
 {
     if(should_lock)
         sys_lockio();
     // flush first
-    rb_dosend(*rb, -1);
+    rb_dosend(rb, -1);
     if(mult > 1)
     {
-        // + 1 because one byte is always reserved
-        size_t size = rb_available_to_write(*rb) + 1;
-        rb_free(*rb);
-        size *= mult;
-        *rb = rb_create(size);
+        size_t size = rb->size;
+        rb_resize(rb, rb->size * mult);
     }
     if(should_lock)
         sys_unlockio();
 }
 
 // A sendto() that writes to a ring_buffer and is real-time safe
-static ssize_t rb_sendto(ring_buffer** rb, int socket, const void *buffer, size_t length, int flags, void* addr, size_t addrlen)
+static ssize_t rb_sendto(ring_buffer* rb, int socket, const void *buffer, size_t length, int flags, void* addr, size_t addrlen)
 {
     //printf("rb_sendto: fd: %d, %zu, rb: %p \"%s\"\n", socket, length, *rb, (char*)buffer);
-    size_t maxLength = rb_available_to_write(*rb);
+    size_t maxLength = rb_available_to_write(rb);
     size_t desiredLength = sizeof(size_t) + length;
     size_t actualLength = desiredLength <= maxLength ? desiredLength : maxLength;
     if(actualLength < desiredLength)
@@ -301,7 +298,7 @@ static ssize_t rb_sendto(ring_buffer** rb, int socket, const void *buffer, size_
         // then send out the new data
         return sendto(socket, buffer, length, 0, addr, addrlen);
     }
-    rb_write_to_buffer(*rb, 5,
+    rb_write_to_buffer(rb, 5,
             (char*)&socket, sizeof(socket),
             (char*)&addrlen, sizeof(addrlen),
             addr, addrlen,
@@ -312,7 +309,7 @@ static ssize_t rb_sendto(ring_buffer** rb, int socket, const void *buffer, size_
 }
 
 // A send() that writes to a ring_buffer and is real-time safe
-ssize_t rb_send(ring_buffer** rb, int socket, const void *buffer, size_t length, int flags)
+ssize_t rb_send(ring_buffer* rb, int socket, const void *buffer, size_t length, int flags)
 {
     return rb_sendto(rb, socket, buffer, length, flags, NULL, 0);
 }
@@ -322,7 +319,7 @@ ssize_t sys_sendto(int sockfd, const void *buf, size_t len, int flags, void* add
 {
     if(rbsend_init())
         return -1;
-    return rb_sendto(&pd_this->pd_inter->i_rbsend, sockfd, buf, len, flags, addr, addrlen);
+    return rb_sendto(pd_this->pd_inter->i_rbsend, sockfd, buf, len, flags, addr, addrlen);
 }
 
 static void gui_failed(const char* s);
@@ -1443,7 +1440,7 @@ static void sys_trytogetmoreguibuf(int newsize)
             pd_this->pd_inter->i_guihead;
         int written = 0;
 #ifdef THREADED_IO
-        sendrb_flush_and_resize(&pd_this->pd_inter->i_guibuf_rb, 1, 2);
+        sendrb_flush_and_resize(pd_this->pd_inter->i_guibuf_rb, 1, 2);
 #endif // THREADED_IO
         while (1)
         {
@@ -1546,7 +1543,7 @@ static int sys_flushtogui(void)
         nwrote = 0;
     if (writesize > 0)
 #ifdef THREADED_IO
-        nwrote = (int)rb_send(&pd_this->pd_inter->i_guibuf_rb, pd_this->pd_inter->i_guisock,
+        nwrote = (int)rb_send(pd_this->pd_inter->i_guibuf_rb, pd_this->pd_inter->i_guisock,
 #else // THREADED_IO
         nwrote = (int)send(pd_this->pd_inter->i_guisock,
 #endif // THREADED_IO
