@@ -376,10 +376,10 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
         return -1;
     }
     int flags = 0;
-#if 0 // turns out this is not portable
+#ifdef MSG_NOSIGNAL
     if(ignoreSigFd == socket)
         flags = MSG_NOSIGNAL;
-#endif
+#endif // MSG_NOSIGNAL
     if(addrlen)
         addr = &rbaddr;
     else
