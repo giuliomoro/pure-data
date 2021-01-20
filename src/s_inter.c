@@ -111,7 +111,7 @@ typedef struct _fdsend {
 #endif // THREADED_IO
 
 enum _fdp_manager {
-    kFdpManagerAnyThread,
+    kFdpManagerAnyThread, // currently, nothing is ever set to this
     kFdpManagerAudioThread,
 #ifdef THREADED_IO
     kFdpManagerIoThread,
