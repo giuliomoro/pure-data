@@ -2477,7 +2477,7 @@ void sys_lockio(void)
     amlockedio = 1;
 }
 
-void sys_unlock(void)
+void sys_unlockio(void)
 {
     if (!amlockedio) bug("duplicate unlockio");
     amlockedio = 0;
