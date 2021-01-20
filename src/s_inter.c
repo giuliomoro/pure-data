@@ -648,9 +648,11 @@ static void poll_fds()
                     size = ret;
                 }
                 // store the received data in the ringbuffer
-                if(rbskt->rs_preserve_boundaries)
+                if(rbskt->rs_preserve_boundaries) {
                     ret = rb_write_to_buffer(rb, 2, &ret, sizeof(ret), buf, size);
-                else {
+                        if(ret)
+                            error("error while writing to ring buffer for fd %d\n", fd);
+                } else {
                     if(0 == ret) {
                         // recv() returning 0 on a streaming socket means the
                         // other hand has closed the connection
