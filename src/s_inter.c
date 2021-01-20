@@ -99,7 +99,8 @@ that didn't really belong anywhere. */
     #define SYNC_COMPARE_AND_SWAP(ptr, oldval, newval) \
             __sync_val_compare_and_swap(ptr, oldval, newval)
   #endif
-  #define SYNC_STORE(ptr, newval) SYNC_COMPARE_AND_SWAP((int*)ptr, (*(int*)ptr), newval)
+  #define SYNC_STORE(ptr, newval) do { int* p = ptr; SYNC_COMPARE_AND_SWAP(p, *p, newval); } while (0);
+  #define T_FDP_MANAGER_INT // needed to match the argument type for SYNC_STORE
 #endif
 
 typedef struct _fdsend {
@@ -109,13 +110,19 @@ typedef struct _fdsend {
 } t_fdsend;
 #endif // THREADED_IO
 
-typedef enum {
+enum _fdp_manager {
     kFdpManagerAnyThread,
     kFdpManagerAudioThread,
 #ifdef THREADED_IO
     kFdpManagerIoThread,
 #endif // THREADED_IO
-} t_fdp_manager;
+};
+
+#ifdef T_FDP_MANAGER_INT
+typedef int t_fdp_manager;
+#else // T_FDP_MANAGER_INT
+typedef enum _fdp_manager t_fdp_manager;
+#endif // T_FDP_MANAGER_INT
 
 typedef struct _fdpoll
 {
