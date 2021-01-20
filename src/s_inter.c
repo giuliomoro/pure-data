@@ -121,7 +121,11 @@ enum _fdp_manager {
     kFdpManagerIoThread,
 #endif // THREADED_IO
 };
+#ifdef THREADED_IO
 typedef t_atomic_int t_fdp_manager;
+#else // THREADED_IO
+typedef enum _fdp_manager t_fdp_manager;
+#endif // THREADED_IO
 
 typedef struct _fdpoll
 {
