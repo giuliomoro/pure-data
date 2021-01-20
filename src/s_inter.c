@@ -408,8 +408,9 @@ static void* poll_thread_loop(void* arg)
     t_pdinstance* pd_that = (t_pdinstance*)arg;
     while(!pd_that->pd_inter->i_iothreadstop)
     {
-        sys_doio(pd_that);
-        usleep(3000);
+        int didsomething = sys_doio(pd_that);
+        if(!didsomething)
+            usleep(3000);
     }
     printf("Exiting polling thread\n");
     return NULL;
@@ -604,16 +605,16 @@ void sys_addsendfdrmfn(int fd, t_fdsendrmfn fn, void* ptr)
 //  - for callbacks that are RT-friendly, sys_domicrosleep() does not need to select()
 //  - for callbacks that are not RT-friendly, sys_domicrosleep() doesn't have to select()
 //  at every call, but only when data is actually available.
-static void poll_fds()
+static int poll_fds()
 {
+    int didsomething = 0;
     char* buf = pd_this->pd_inter->i_iothreadbuf;
     const unsigned int bufsize = pd_this->pd_inter->i_iothreadbufsize;
     ssize_t ret;
     struct timeval timout = {0}; // making this timeout longer would be more efficient (by avoiding spurious wakeups), but it would needlessly postpone writes
-    int pollem = 1;
     int i;
     t_fdpoll *fp;
-    if (pollem && pd_this->pd_inter->i_nfdpoll)
+    if (pd_this->pd_inter->i_nfdpoll)
     {
         fd_set readset;
         fdp_select(&readset, timout, kFdpManagerIoThread);
@@ -646,6 +647,7 @@ static void poll_fds()
                     ret = -errno;
                 } else {
                     size = ret;
+                    didsomething = 1;
                 }
                 // store the received data in the ringbuffer
                 if(rbskt->rs_preserve_boundaries) {
@@ -670,25 +672,27 @@ static void poll_fds()
             }
         }
     }
+    return didsomething;
 }
 
 // call this from a non-real-time thread to process IO
 // it thread-safely acceesses elements of pd_inter, but as it
 // it needs a reference ot the "pd_this" that it is operating on
-void sys_doio(t_pdinstance* pd_that)
+int sys_doio(t_pdinstance* pd_that)
 {
 #ifdef PDINSTANCE
     t_pdinstance* pd_bak = pd_this;
     pd_this = pd_that;
 #endif // PDINSTANCE
     sys_lockio();
-    poll_fds();
+    int didsomething = poll_fds();
     rb_dosend(pd_this->pd_inter->i_rbsend, -1);
     rb_dosend(pd_this->pd_inter->i_guibuf_rb, -1);
     sys_unlockio();
 #ifdef PDINSTANCE
     pd_this = pd_bak;
 #endif // PDINSTANCE
+    return didsomething;
 }
 
 #endif // THREADED_IO
