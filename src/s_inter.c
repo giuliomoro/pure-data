@@ -83,24 +83,27 @@ that didn't really belong anywhere. */
   #define SYNC_COMPARE_AND_SWAP(ptr, oldval, newval) \
           atomic_compare_exchange_strong((_Atomic int *)ptr, &oldval, newval)
   #define SYNC_STORE(ptr, newval) atomic_store((_Atomic int *)ptr, newval)
+  #define t_atomic_int int
 #else // use platform specfics
   #ifdef __APPLE__ // apple atomics
     #include <libkern/OSAtomic.h>
     #define SYNC_FETCH(ptr) OSAtomicOr32Barrier(0, (volatile uint32_t *)ptr)
     #define SYNC_COMPARE_AND_SWAP(ptr, oldval, newval) \
             OSAtomicCompareAndSwap32Barrier(oldval, newval, ptr)
+    #define t_atomic_int int32_t
   #elif defined(_WIN32) || defined(_WIN64) // win api atomics
     #include <windows.h>
     #define SYNC_FETCH(ptr) InterlockedOr(ptr, 0)
     #define SYNC_COMPARE_AND_SWAP(ptr, oldval, newval) \
             InterlockedCompareExchange(ptr, oldval, newval)
+    #define t_atomic_int LONG
   #else // gcc atomics
     #define SYNC_FETCH(ptr) __sync_fetch_and_or(ptr, 0)
     #define SYNC_COMPARE_AND_SWAP(ptr, oldval, newval) \
             __sync_val_compare_and_swap(ptr, oldval, newval)
+    #define t_atomic_int int
   #endif
-  #define SYNC_STORE(ptr, newval) do { int* p = ptr; SYNC_COMPARE_AND_SWAP(p, *p, newval); } while (0);
-  #define T_FDP_MANAGER_INT // needed to match the argument type for SYNC_STORE
+  #define SYNC_STORE(ptr, newval) do { t_atomic_int* p = ptr; SYNC_COMPARE_AND_SWAP(p, *p, newval); } while (0);
 #endif
 
 typedef struct _fdsend {
@@ -117,12 +120,7 @@ enum _fdp_manager {
     kFdpManagerIoThread,
 #endif // THREADED_IO
 };
-
-#ifdef T_FDP_MANAGER_INT
-typedef int t_fdp_manager;
-#else // T_FDP_MANAGER_INT
-typedef enum _fdp_manager t_fdp_manager;
-#endif // T_FDP_MANAGER_INT
+typedef t_atomic_int t_fdp_manager;
 
 typedef struct _fdpoll
 {
