@@ -795,6 +795,13 @@ static void fdp_select(fd_set *readset, struct timeval timout, const t_fdp_manag
             perror("microsleep select");
 }
 
+static void callpollfn(int i)
+{
+    (*pd_this->pd_inter->i_fdpoll[i].fdp_fn)
+        (pd_this->pd_inter->i_fdpoll[i].fdp_ptr,
+            pd_this->pd_inter->i_fdpoll[i].fdp_fd);
+}
+
 /* sleep (but cancel the sleeping if pollem is set and any file descriptors are
 ready - in that case, dispatch any resulting Pd messages and return.  Called
 with sys_lock() set.  We will temporarily release the lock if we actually
@@ -844,35 +851,24 @@ static int sys_domicrosleep(int microsec, int pollem)
             !pd_this->pd_inter->i_fdschanged; i++)
         {
             t_fdpoll *fp = pd_this->pd_inter->i_fdpoll + i;
-            int fd = fp->fdp_fd;
-            int should_call = 0;
 #ifdef THREADED_IO
             t_fdp_manager fdp_manager = SYNC_FETCH(&fp->fdp_manager);
             if(kFdpManagerAudioThread == fdp_manager) {
-                should_call = 1;
+                callpollfn(i);
                 didsomething = 1;
+                // restore ownership to IO thread
+               SYNC_STORE(&fp->fdp_manager, kFdpManagerIoThread);
             } else {
                 if(rbskt_ready(fp->fdp_rbskt))
-                    should_call = 1;
+                    callpollfn(i);
             }
 #else // THREADED_IO
             if(kFdpManagerAudioThread == fp->fdp_manager) {
-                if(FD_ISSET(fd, &readset)) {
-                    should_call = 1;
+                if(FD_ISSET(fp->fdp_fd, &readset)) {
+                    callpollfn(i);
                     didsomething = 1;
                 }
             }
-#endif // THREADED_IO
-            if(should_call)
-            {
-                (*pd_this->pd_inter->i_fdpoll[i].fdp_fn)
-                    (pd_this->pd_inter->i_fdpoll[i].fdp_ptr,
-                        pd_this->pd_inter->i_fdpoll[i].fdp_fd);
-            }
-#ifdef THREADED_IO
-            // restore ownership to IO thread
-            if(kFdpManagerAudioThread == fp->fdp_manager)
-               SYNC_STORE(&fp->fdp_manager, kFdpManagerIoThread);
 #endif // THREADED_IO
         }
         if (didsomething)
