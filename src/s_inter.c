@@ -527,7 +527,7 @@ int rbskt_recvfrom(t_rbskt* rbskt, void* buf, size_t buflen, int nothing, struct
     ssize_t msglen;
     int available = rb_available_to_read(rb);
     if(rbskt->rs_preserve_boundaries) {
-        // UDP: the buffer contains return value, addresslen, address, data
+        // UDP: the buffer contains return value, addresslen, address, payload
         if(available < sizeof(ssize_t) + sizeof(socklen_t))
             return 0;
         if((rb_read_from_buffer(rb, (char*)&msglen, sizeof(msglen))))
@@ -536,17 +536,8 @@ int rbskt_recvfrom(t_rbskt* rbskt, void* buf, size_t buflen, int nothing, struct
             errno = EPERM;
             return -1;
         }
-        // msglen contains the return value of recvfrom(), or -errno if an
-        // error occurred
-        if(msglen <= 0) {
-            printf("%p Msglen: %ld\n", rb, msglen);
-            // to comply with recvfrom(),
-            // set errno and return -1
-            errno = -msglen;
-            // TODO: do not return here, first we need to remove the rest of
-            // the message from the ring buffer
-            return -1;
-        }
+        // we handle the content of msglen below, but first we need to retrieve
+        // the rest of the message from the ring buffer
         available -= sizeof(msglen);
         struct sockaddr_storage fromaddr;
         socklen_t fromaddrlen;
@@ -567,9 +558,19 @@ int rbskt_recvfrom(t_rbskt* rbskt, void* buf, size_t buflen, int nothing, struct
             if(address)
                 memcpy(address, &fromaddr, *address_len);
         }
-        // the packet is still in the buffer, will be retrievd below
+        // msglen contains the return value of recvfrom(), or -errno if an
+        // error occurred and no payload is in the buffer
+        if(msglen <= 0) {
+            printf("%p Msglen: %ld\n", rb, msglen);
+            // to comply with recvfrom(),
+            // set errno and return -1
+            errno = -msglen;
+            return -1;
+        }
+        // if we made it to here, the actual packet content is still in the
+        // buffer and will be retrievd below
     } else {
-        // TCP: the buffer contains only data.
+        // TCP: the buffer contains only payload.
         // if an error occurred, it was passed by setting the errno field
         if(rbskt->rs_errno) {
             errno = rbskt->rs_errno;
