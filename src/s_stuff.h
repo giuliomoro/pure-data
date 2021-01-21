@@ -194,13 +194,15 @@ typedef void (*t_fdpollfn)(void *ptr, int fd);
 EXTERN void sys_addpollfn(int fd, t_fdpollfn fn, void *ptr);
 EXTERN void sys_rmpollfn(int fd);
 #ifdef THREADED_IO
+#include <sys/socket.h> // struct sockaddr, socklen_t
 #define t_rbskt struct _rbskt
 typedef void (*t_fdsendrmfn)(void *ptr);
 EXTERN void sys_addpollrb(int fd, int preserve_boundaries);
 EXTERN t_rbskt* sys_getpollrb(int fd);
 void sys_addsendfdrmfn(int sockfd, t_fdsendrmfn, void* x);
 ssize_t sys_sendto(int sockfd, const void *buf, size_t len, int flags, void* addr, size_t addrlen);
-EXTERN int rbskt_recv(t_rbskt* rbskt, char* buf, size_t length, void* nothing);
+EXTERN int rbskt_recv(t_rbskt* rbskt, void* buf, size_t length, int nothing);
+EXTERN int rbskt_recvfrom(t_rbskt* rbskt, void* buf, size_t buflen, int nothing, struct sockaddr *address, socklen_t* address_len);
 EXTERN int rbskt_bytes_available(t_rbskt* rbskt);
 #endif // THREADED_IO
 #if defined(USEAPI_OSS) || defined(USEAPI_ALSA)

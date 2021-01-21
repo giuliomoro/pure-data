@@ -132,14 +132,17 @@ static void netsend_readbin(t_netsend *x, int fd)
     }
     while (1)
     {
-#ifdef THREADED_IO
-        // TODO: retrieve fromaddr
-        ret = rbskt_recv(rbskt, (char*)inbuf, INBUFSIZE, 0);
-#else // THREADED_IO
         if (x->x_protocol == SOCK_DGRAM)
+#ifdef THREADED_IO
+            ret = (int)rbskt_recvfrom(rbskt, inbuf, INBUFSIZE, 0,
+#else // THREADED_IO
             ret = (int)recvfrom(fd, inbuf, INBUFSIZE, 0,
+#endif // THREADED_IO
                 (struct sockaddr *)&fromaddr, &fromaddrlen);
         else
+#ifdef THREADED_IO
+            ret = (int)rbskt_recv(rbskt, inbuf, INBUFSIZE, 0);
+#else // THREADED_IO
             ret = (int)recv(fd, inbuf, INBUFSIZE, 0);
 #endif // THREADED_IO
         if (ret <= 0)

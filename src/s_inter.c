@@ -521,34 +521,55 @@ t_rbskt* sys_getpollrb(int fd)
     return fp->fdp_rbskt;
 }
 
-int rbskt_recv(t_rbskt* rbskt, char* buf, size_t buflen, void* nothing)
+int rbskt_recvfrom(t_rbskt* rbskt, void* buf, size_t buflen, int nothing, struct sockaddr *address, socklen_t* address_len)
 {
     ring_buffer* rb = rbskt->rs_rb;
-    int ret;
     ssize_t msglen;
-    int available;
-    available = rb_available_to_read(rb);
+    int available = rb_available_to_read(rb);
     if(rbskt->rs_preserve_boundaries) {
-        if(available < sizeof(ssize_t))
+        // UDP: the buffer contains return value, addresslen, address, data
+        if(available < sizeof(ssize_t) + sizeof(socklen_t))
             return 0;
-        if((ret = rb_read_from_buffer(rb, (char*)&msglen, sizeof(msglen))))
+        if((rb_read_from_buffer(rb, (char*)&msglen, sizeof(msglen))))
         {
             error("Error while reading from ring_buffer in rbskt_recv: couldn't read from rb");
             errno = EPERM;
             return -1;
         }
-        // msglen contains the return value of recv(), or -errno if an error occurred
+        // msglen contains the return value of recvfrom(), or -errno if an
+        // error occurred
         if(msglen <= 0) {
             printf("%p Msglen: %ld\n", rb, msglen);
             // to comply with recvfrom(),
             // set errno and return -1
             errno = -msglen;
+            // TODO: do not return here, first we need to remove the rest of
+            // the message from the ring buffer
             return -1;
         }
-        // if recv() was successful, the ring buffer should contain at least as
-        // much data as was retrieved by it.
         available -= sizeof(msglen);
+        struct sockaddr_storage fromaddr;
+        socklen_t fromaddrlen;
+        if(rb_read_from_buffer(rb, (char*)&fromaddrlen, sizeof(fromaddrlen)))
+        {
+            fprintf(stderr, "We shouldn't be here 5\n");
+            return -1;
+        }
+        available -= sizeof(fromaddrlen);
+        if(rb_read_from_buffer(rb, (char*)&fromaddr, fromaddrlen))
+        {
+            fprintf(stderr, "We shouldn't be here 6\n");
+            return -1;
+        }
+        available -= fromaddrlen;
+        if(address_len) {
+            *address_len = fromaddrlen < *address_len ? fromaddrlen : *address_len;
+            if(address)
+                memcpy(address, &fromaddr, *address_len);
+        }
+        // the packet is still in the buffer, will be retrievd below
     } else {
+        // TCP: the buffer contains only data.
         // if an error occurred, it was passed by setting the errno field
         if(rbskt->rs_errno) {
             errno = rbskt->rs_errno;
@@ -567,7 +588,7 @@ int rbskt_recv(t_rbskt* rbskt, char* buf, size_t buflen, void* nothing)
     }
     // only request as many bytes as we can store if they are available
     int actualLength = buflen < msglen ? buflen : msglen;
-    ret = rb_read_from_buffer(rb, buf, actualLength);
+    int ret = rb_read_from_buffer(rb, buf, actualLength);
     if(ret)
     {
         errno = EPERM;
@@ -585,6 +606,11 @@ int rbskt_recv(t_rbskt* rbskt, char* buf, size_t buflen, void* nothing)
         }
     }
     return actualLength;
+}
+
+int rbskt_recv(t_rbskt* rbskt, void* buf, size_t buflen, int nothing)
+{
+    return rbskt_recvfrom(rbskt, buf, buflen, 0, NULL, 0);
 }
 
 // if this is called with (1), then the audio thread will not manage the I/O
@@ -676,9 +702,13 @@ static int poll_fds()
                     continue;
                 }
                 // we adapted socketreceiver_read and netsend_readbin to use
-                // rbskt_recv instead of recv. So here we are only reading from the
-                // socket and making the data available through rbskt_recv
-                ret = recv(fd, buf, size, 0);
+                // rbskt_recv}from} instead of recv{from}. So here we are only
+                // reading from the socket and making the data available
+                // through rbskt_recv{from}
+                struct sockaddr_storage fromaddr;
+                socklen_t fromaddrlen = sizeof(struct sockaddr_storage);
+                ret = recvfrom(fd, buf, size, 0,
+                    (struct sockaddr *)&fromaddr, &fromaddrlen);
                 if(ret < 0)
                 {
                     size = 0;
@@ -689,9 +719,14 @@ static int poll_fds()
                 }
                 // store the received data in the ringbuffer
                 if(rbskt->rs_preserve_boundaries) {
-                    ret = rb_write_to_buffer(rb, 2, &ret, sizeof(ret), buf, size);
-                        if(ret)
-                            error("error while writing to ring buffer for fd %d\n", fd);
+                    ret = rb_write_to_buffer(rb, 4,
+                        &ret, sizeof(ret),
+                        (char*)&fromaddrlen, sizeof(fromaddrlen),
+                        &fromaddr, (size_t)fromaddrlen,
+                        buf, (size_t)size
+                        );
+                    if(ret)
+                        error("error while writing to ring buffer for fd %d\n", fd);
                 } else {
                     if(0 == ret) {
                         // recv() returning 0 on a streaming socket means the
@@ -1210,14 +1245,11 @@ static void socketreceiver_getudp(t_socketreceiver *x, int fd)
     while (1)
     {
 #ifdef THREADED_IO
-        ret = rbskt_recv(rbskt, buf, INBUFSIZE, 0);
-        // TODO: retrieve fromaddr
-        x->sr_fromaddr = NULL;
-        fromaddrlen = 0;
+        ret = (int)rbskt_recvfrom(rbskt, buf, INBUFSIZE, 0,
 #else // THREADED_IO
         ret = (int)recvfrom(fd, buf, INBUFSIZE, 0,
-            (struct sockaddr *)x->sr_fromaddr, (x->sr_fromaddr ? &fromaddrlen : 0));
 #endif // THREADED_IO
+            (struct sockaddr *)x->sr_fromaddr, (x->sr_fromaddr ? &fromaddrlen : 0));
         if (ret < 0)
         {
                 /* socket_errno_udp() ignores some error codes */
