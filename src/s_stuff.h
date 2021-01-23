@@ -10,6 +10,8 @@ in future releases.  The public (stable) API is in m_pd.h. */
 
 /* in s_path.c */
 
+#include <sys/socket.h> // struct sockaddr, socklen_t
+
 typedef struct _namelist    /* element in a linked list of stored strings */
 {
     struct _namelist *nl_next;  /* next in list */
@@ -60,7 +62,6 @@ EXTERN void sys_register_loader(loader_t loader);
 #define SENDDACS_SLEPT 2
 
 #define DEFDACBLKSIZE 64
-#define THREADED_IO
 extern int sys_hipriority;      /* real-time flag, true if priority boosted */
 extern int sys_schedadvance;
 extern int sys_sleepgrain;
@@ -163,13 +164,6 @@ void sched_set_using_audio(int flag);
 
 EXTERN void sys_microsleep(int microsec);
 EXTERN void sys_init_fdpoll(void);
-#ifdef THREADED_IO
-/* return true if it did read any data from any socket. */
-EXTERN int sys_doio(t_pdinstance* pd_that);
-EXTERN void sys_dontmanageio(int status);
-EXTERN void sys_startiothread(t_pdinstance* pd_that);
-EXTERN void sys_stopiothread();
-#endif // THREADED_IO
 
 EXTERN void sys_bail(int exitcode);
 EXTERN int sys_pollgui(void);
@@ -187,25 +181,39 @@ EXTERN t_socketreceiver *socketreceiver_new(void *owner,
 EXTERN void socketreceiver_read(t_socketreceiver *x, int fd);
 EXTERN void socketreceiver_set_fromaddrfn(t_socketreceiver *x,
     t_socketfromaddrfn fromaddrfn);
+EXTERN void socketreceiver_set_threaded(t_socketreceiver *x, int fd,
+    int threaded);
 EXTERN void sys_sockerror(const char *s);
 EXTERN void sys_closesocket(int fd);
 
 typedef void (*t_fdpollfn)(void *ptr, int fd);
 EXTERN void sys_addpollfn(int fd, t_fdpollfn fn, void *ptr);
 EXTERN void sys_rmpollfn(int fd);
-#ifdef THREADED_IO
-#include <sys/socket.h> // struct sockaddr, socklen_t
+
+/* tells whether Pd has capabilities for threaded I/O */
+int sys_hasthreadedio();
+
 #define t_rbskt struct _rbskt
+/* Functions related to threaded I/O.
+ * They are all NOP if sys_hasthreadedio() returns false */
 typedef void (*t_fdsendrmfn)(void *ptr);
 EXTERN void sys_addpollrb(int fd, int preserve_boundaries);
 EXTERN t_rbskt* sys_getpollrb(int fd);
-void sys_addsendfdrmfn(int sockfd, t_fdsendrmfn, void* x);
+void sys_addsendfdrmfn(int sockfd, t_fdsendrmfn fn, void* x);
 ssize_t sys_sendto(int sockfd, const void *buf, size_t len, int flags, const struct sockaddr *dest_addr, socklen_t dest_len);
 ssize_t sys_send(int sockfd, const void *buf, size_t len, int flags);
 EXTERN int rbskt_recv(t_rbskt* rbskt, void* buf, size_t length, int nothing);
 EXTERN int rbskt_recvfrom(t_rbskt* rbskt, void* buf, size_t buflen, int nothing, struct sockaddr *address, socklen_t* address_len);
 EXTERN int rbskt_bytes_available(t_rbskt* rbskt);
-#endif // THREADED_IO
+/* return true if it did read any data from any socket. */
+EXTERN int sys_doio(t_pdinstance* pd_that);
+EXTERN void sys_dontmanageio(int status);
+/* Start Pd's IO thread if it hasn't started already */
+EXTERN void sys_startiothread(t_pdinstance* pd_that);
+/* Stop and join Pd's IO thread (if any). Returns when the thread has exited */
+EXTERN void sys_stopiothread();
+/* end of threaded I/O functions */
+
 #if defined(USEAPI_OSS) || defined(USEAPI_ALSA)
 void sys_setalarm(int microsec);
 #endif

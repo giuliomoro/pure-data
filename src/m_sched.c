@@ -602,9 +602,8 @@ static void m_callbackscheduler(void)
 
 int m_mainloop(void)
 {
-#ifdef THREADED_IO
-    sys_startiothread(pd_this);
-#endif // THREADED_IO
+    if(sys_hasthreadedio())
+        sys_startiothread(pd_this);
     while (sys_quit != SYS_QUIT_QUIT)
     {
         if (sched_useaudio == SCHED_AUDIO_CALLBACK)
