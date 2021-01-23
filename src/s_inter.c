@@ -339,7 +339,10 @@ ssize_t rb_send(ring_buffer* rb, int socket, const void *buffer, size_t length, 
 ssize_t sys_sendto(int sockfd, const void *buf, size_t len, int flags, const struct sockaddr *dest_addr, socklen_t dest_len)
 {
     if(rbsend_init())
+    {
+        errno = ENOBUFS;
         return -1;
+    }
     return rb_sendto(pd_this->pd_inter->i_rbsend, sockfd, buf, len, flags, dest_addr, dest_len);
 }
 
@@ -935,7 +938,7 @@ static int sys_domicrosleep(int microsec, int pollem)
         {
             t_fdpoll *fp = pd_this->pd_inter->i_fdpoll + i;
             int fd = fp->fdp_fd;
-            // IMPORTANT: this fp is invalidated if i_fdschanged becomes ture
+            // IMPORTANT: this fp is invalidated if i_fdschanged becomes true
             //after callpollfn().
 #ifdef THREADED_IO
             t_fdp_manager fdp_manager = SYNC_FETCH(&fp->fdp_manager);
@@ -2376,6 +2379,8 @@ void s_inter_newpdinstance(void)
 #ifdef THREADED_IO
     pd_this->pd_inter->i_iothreadbufsize = IOTHREADBUF_SIZE;
     pd_this->pd_inter->i_iothreadbuf = getbytes(pd_this->pd_inter->i_iothreadbufsize);
+    rbrmfdsend_init();
+    rbsend_init();
 #endif // THREADED_IO
 #ifdef _WIN32
     pd_this->pd_inter->i_freq = 0;
