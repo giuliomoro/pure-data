@@ -263,6 +263,15 @@ int rbskt_bytes_available(t_rbskt* rbskt) {
     return rb_available_to_read(rbskt->rs_rb);
 }
 
+// TODO:
+// these macros should allow to safely print from the IO thread. Ideally they'd
+// allow to post to the Pd console as well, however, it is not as
+// straightforward as calling sys_lock() because these functions may be
+// occasionally called from the audio thread and so we would deadlock.
+// To handle these properly, one would need to inquiry what thread we are in.
+#define iot_error(s, ...) fprintf(stderr, "I/O thread ERROR: " s "\n", ## __VA_ARGS__)
+#define iot_warning(s, ...) fprintf(stderr, "I/O thread warning: " s "\n", ## __VA_ARGS__)
+
 // to ensure the correct order is preserved when calling send()/sendto()
 // directly from outside rb_dosendone(), always flush the corresponding
 // ringbuffer first
@@ -290,6 +299,11 @@ struct rb_sendto_msg {
 // A sendto() that writes to a ring_buffer and is real-time safe
 static ssize_t rb_sendto(ring_buffer* rb, int socket, const void *buffer, size_t length, int flags, const struct sockaddr *addr, socklen_t addrlen)
 {
+    if(!rb)
+    {
+        error("Trying to send to network via non-existing rb\n");
+        return -1;
+    }
     //printf("rb_sendto: rb: %p, fd: %d, length: %zu, flags: %d, addrlen: %u \n", rb, socket, length, flags, addrlen);
     size_t maxLength = rb_available_to_write(rb);
     size_t desiredLength = sizeof(socket) + sizeof(flags) + sizeof(addrlen) + addrlen + sizeof(length) + length;
@@ -356,7 +370,7 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
     {
         if(rb_read_from_buffer(rb, (char*)&rbaddr, m.addrlen) < 0)
         {
-            error("we should not be here 1");
+            iot_error("we should not be here 1");
             return -1;
         }
         addr = &rbaddr;
@@ -382,7 +396,7 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
         int toread = bufsize < length ? bufsize : length;
         if(rb_read_from_buffer(rb, buf, toread) < 0)
         {
-            error("we should not be here 2");
+            iot_error("we should not be here 2");
             return -1;
         }
         int sent = 0;
@@ -400,7 +414,7 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
         length -= toread;
         if(failed)
         {
-            error("Error on outgoing socket. Discarding %zu bytes of an"
+            iot_warning("Error on outgoing socket. Discarding %zu bytes of an"
                     "outgoing packet of size %zu\n", length, m.length);
             // read and discard the rest of the message from the ring buffer to
             // leave it in a consistent state
@@ -415,12 +429,12 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
         if(EPIPE == errno && ignoreSigFd == m.socket) {
             printf ("EPIPE on %d\n", m.socket);
         } else {
-            fprintf(stderr, "failed sendto(%d, %p, %lu, %d, %p, %u) call: %d %s\n", m.socket, buf, m.length, flags, addr, m.addrlen, errno, strerror(errno));
+            iot_warning("failed sendto(%d, %p, %lu, %d, %p, %u) call: %d %s\n", m.socket, buf, m.length, flags, addr, m.addrlen, errno, strerror(errno));
             ring_buffer* rbrmfdsend = pd_this->pd_inter->i_rbrmfdsend;
             if(rbrmfdsend)
                 rb_write_to_buffer(rbrmfdsend, 1, &socket, sizeof(socket));
             else
-                printf("rbrmfdsend is not inited. Cannot delete fd %d\n", m.socket);
+                iot_error("rbrmfdsend is not inited. Cannot delete fd %d\n", m.socket);
             if(m.socket == pd_this->pd_inter->i_guisock)
                 gui_failed("pd-to-gui socket");
         }
@@ -500,7 +514,7 @@ static int rbrmfdsend_init()
         pd_this->pd_inter->i_rbrmfdsend = rb_create(RBRMFDSEND_SIZE);
     if(!pd_this->pd_inter->i_rbrmfdsend)
     {
-        perror("unable to create ring buffer for failed fds");
+        error("Unable to create ring buffer for failed fds");
         return -1;
     }
     return 0;
@@ -556,13 +570,13 @@ int rbskt_recvfrom(t_rbskt* rbskt, void* buf, size_t buflen, int nothing, struct
         socklen_t fromaddrlen;
         if(rb_read_from_buffer(rb, (char*)&fromaddrlen, sizeof(fromaddrlen)))
         {
-            fprintf(stderr, "We shouldn't be here 5\n");
+            error("We shouldn't be here 5\n");
             return -1;
         }
         available -= sizeof(fromaddrlen);
         if(rb_read_from_buffer(rb, (char*)&fromaddr, fromaddrlen))
         {
-            fprintf(stderr, "We shouldn't be here 6\n");
+            error("We shouldn't be here 6\n");
             return -1;
         }
         available -= fromaddrlen;
@@ -739,7 +753,7 @@ static int poll_fds()
                 buf, (size_t)size
                 );
             if(ret)
-                error("error while writing to ring buffer for fd %d\n", fd);
+                iot_error("error while writing to ring buffer for fd %d\n", fd);
         } else {
             if(0 == ret) {
                 // recv() returning 0 on a streaming socket means the
@@ -752,7 +766,7 @@ static int poll_fds()
                 // everything OK, let's send the data
                 ret = rb_write_to_buffer(rb, 1, buf, size);
                 if(ret)
-                    error("error while writing to ring buffer for fd %d\n", fd);
+                    iot_error("error while writing to ring buffer for fd %d\n", fd);
             }
         }
     }
@@ -906,7 +920,6 @@ static int sys_domicrosleep(int microsec, int pollem)
                     t_fdsend* fdsends = pd_this->pd_inter->i_fdsend;
                     if(fd == fdsends[i].fds_fd)
                     {
-                        printf("fd %d found to belong to %p, so calling %p\n", fd, fdsends[i].fds_ptr, fdsends[i].fds_fn);
                         fdsends[i].fds_fn(fdsends[i].fds_ptr);
                     }
                 }
