@@ -950,8 +950,8 @@ static int sys_domicrosleep(int microsec, int pollem)
                     // grab a fresh pointer
                     fp = find_fdpoll(fd);
                 }
-                // restore ownership to IO thread
-               SYNC_STORE(&fp->fdp_manager, kFdpManagerIoThread);
+                if(fp) // restore ownership to IO thread
+                    SYNC_STORE(&fp->fdp_manager, kFdpManagerIoThread);
             } else {
                 if(rbskt_ready(fp->fdp_rbskt))
                     callpollfn(i);
