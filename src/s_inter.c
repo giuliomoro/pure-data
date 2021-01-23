@@ -275,10 +275,7 @@ static void sendrb_flush_and_resize(ring_buffer* rb, int should_lock, int mult)
     // flush first
     rb_dosend(rb, -1);
     if(mult > 1)
-    {
-        size_t size = rb->size;
         rb_resize(rb, rb->size * mult);
-    }
     if(should_lock)
         sys_unlockio();
 }
@@ -683,85 +680,79 @@ static int poll_fds()
     ssize_t ret;
     struct timeval timout = {0}; // making this timeout longer would be more efficient (by avoiding spurious wakeups), but it would needlessly postpone writes
     int i;
-    if (pd_this->pd_inter->i_nfdpoll)
+    fd_set readset;
+    int sel = fdp_select(&readset, timout, kFdpManagerIoThread);
+    if(sel <= 0)
+        return 0;
+    for (i = 0; i < pd_this->pd_inter->i_nfdpoll; i++)
     {
-        fd_set readset;
-        int sel = fdp_select(&readset, timout, kFdpManagerIoThread);
-        if(sel <= 0)
-            return 0;
-        for (i = 0; i < pd_this->pd_inter->i_nfdpoll; i++)
+        t_fdpoll *fp = pd_this->pd_inter->i_fdpoll + i;
+        int fd = fp->fdp_fd;
+        if(fp->fdp_manager != kFdpManagerIoThread)
+            continue;
+        if(!FD_ISSET(fd, &readset))
+            continue;
+        if(fp->fdp_callback_in_audio_thread)
         {
-            t_fdpoll *fp = pd_this->pd_inter->i_fdpoll + i;
-            int fd = fp->fdp_fd;
-            if(fp->fdp_manager != kFdpManagerIoThread)
-                continue;
-            if(!FD_ISSET(fd, &readset))
-                continue;
-            if(fp->fdp_callback_in_audio_thread)
-            {
-                // temporarily transfer ownership
-                SYNC_STORE(&fp->fdp_manager, kFdpManagerAudioThread);
-            }
-            else
-            {
-                int fd = fp->fdp_fd;
-                t_rbskt* rbskt = fp->fdp_rbskt;
-                ring_buffer* rb = rbskt->rs_rb;
-                unsigned int size = rb_available_to_write(rb);
-                if(0 == size
-                    || (rbskt->rs_preserve_boundaries
-                        && (socket_bytes_available(fd) + sizeof(ret)) > size))
-                {
-                    // not enough space in the ring buffer: let's postpone
-                    // recv() while the audio thread empties the ringbuffer
-                    fprintf(stderr, "Throttling read on fd %d\n", fd);
-                    continue;
-                }
-                // UDP: bufsize is always large enough for the largest UDP packet
-                // TCP: packets may be larger, but we can split them at
-                // arbitrary points
-                size = size < bufsize ? size : bufsize;
-                // rt-compliant pollfn functions will call
-                // rbskt_recv{from} instead of recv{from}. So here we are only
-                // reading from the socket and making the data available
-                // through rbskt_recv{from}
-                struct sockaddr_storage fromaddr;
-                socklen_t fromaddrlen = sizeof(struct sockaddr_storage);
-                ret = recvfrom(fd, buf, size, 0,
-                    (struct sockaddr *)&fromaddr, &fromaddrlen);
-                if(ret < 0)
-                {
-                    size = 0;
-                    ret = -errno;
-                } else {
-                    size = ret;
-                    didsomething = 1;
-                }
-                // store the received data in the ringbuffer
-                if(rbskt->rs_preserve_boundaries) {
-                    ret = rb_write_to_buffer(rb, 4,
-                        &ret, sizeof(ret),
-                        (char*)&fromaddrlen, sizeof(fromaddrlen),
-                        &fromaddr, (size_t)fromaddrlen,
-                        buf, (size_t)size
-                        );
-                    if(ret)
-                        error("error while writing to ring buffer for fd %d\n", fd);
-                } else {
-                    if(0 == ret) {
-                        // recv() returning 0 on a streaming socket means the
-                        // other hand has closed the connection
-                        rbskt->rs_closed = 1;
-                    } else if (ret < 0) {
-                        // an error has occurred, we store errno
-                        rbskt->rs_errno = -ret;
-                    } else {
-                        // everything OK, let's send the data
-                        ret = rb_write_to_buffer(rb, 1, buf, size);
-                        if(ret)
-                            error("error while writing to ring buffer for fd %d\n", fd);
-                    }
-                }
+            // temporarily transfer ownership
+            SYNC_STORE(&fp->fdp_manager, kFdpManagerAudioThread);
+            continue;
+        }
+        t_rbskt* rbskt = fp->fdp_rbskt;
+        ring_buffer* rb = rbskt->rs_rb;
+        unsigned int size = rb_available_to_write(rb);
+        if(0 == size
+            || (rbskt->rs_preserve_boundaries
+                && (socket_bytes_available(fd) + sizeof(ret)) > size))
+        {
+            // not enough space in the ring buffer: let's postpone
+            // recv() while the audio thread empties the ringbuffer
+            fprintf(stderr, "Throttling read on fd %d\n", fd);
+            continue;
+        }
+        // UDP: bufsize is always large enough for the largest UDP packet
+        // TCP: packets may be larger, but we can split them at
+        // arbitrary points
+        size = size < bufsize ? size : bufsize;
+        // rt-compliant pollfn functions will call
+        // rbskt_recv{from} instead of recv{from}. So here we are only
+        // reading from the socket and making the data available
+        // through rbskt_recv{from}
+        struct sockaddr_storage fromaddr;
+        socklen_t fromaddrlen = sizeof(struct sockaddr_storage);
+        ret = recvfrom(fd, buf, size, 0,
+            (struct sockaddr *)&fromaddr, &fromaddrlen);
+        if(ret < 0)
+        {
+            size = 0;
+            ret = -errno;
+        } else {
+            size = ret;
+            didsomething = 1;
+        }
+        // store the received data in the ringbuffer
+        if(rbskt->rs_preserve_boundaries) {
+            ret = rb_write_to_buffer(rb, 4,
+                &ret, sizeof(ret),
+                (char*)&fromaddrlen, sizeof(fromaddrlen),
+                &fromaddr, (size_t)fromaddrlen,
+                buf, (size_t)size
+                );
+            if(ret)
+                error("error while writing to ring buffer for fd %d\n", fd);
+        } else {
+            if(0 == ret) {
+                // recv() returning 0 on a streaming socket means the
+                // other hand has closed the connection
+                rbskt->rs_closed = 1;
+            } else if (ret < 0) {
+                // an error has occurred, we store errno
+                rbskt->rs_errno = -ret;
+            } else {
+                // everything OK, let's send the data
+                ret = rb_write_to_buffer(rb, 1, buf, size);
+                if(ret)
+                    error("error while writing to ring buffer for fd %d\n", fd);
             }
         }
     }
