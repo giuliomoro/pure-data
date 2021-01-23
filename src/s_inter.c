@@ -365,14 +365,14 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
     ret = 0;
     int failed = 0;
     length = totallength;
-    while(length)
+    while(!failed && length)
     {
-        // the only case in which length > bufsize is for a TCP packet (because
-        // i_iothreadbufsize should be at least as large as the largest UDP
-        // packet), so it's fine to split the outgoing data at arbitrary
-        // points.
-        // We do split readings from the ring buffer and send data out as we
-        // retrieve it.
+        // this loop processes boh TCP and UDP packets.
+        // UDP: the loop executes only once because bufsize(i_iothreadbufsize)
+        // should be at least as large as the largest UDP packet.
+        // TCP: for larger packets, it may execute more than once. In that
+        // case, we do split readings from the ring buffer and send data out as
+        // we retrieve it.
         int toread = bufsize < length ? bufsize : length;
         if(rb_read_from_buffer(rb, buf, toread) < 0)
         {
@@ -383,18 +383,25 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
         while(!failed && sent != toread) {
             // sendto() may not accept all our data at once, so we may have to
             // do multiple writes here
+            // TCP: addrlen will have been set to 0 and addr to NULL, so this
+            // is equivalent to send()
             ret = sendto(socket, buf, toread, flags, addr, addrlen);
             if(ret < 0)
-                ++failed;
+                failed = 1;
             else
                 sent += ret;
         }
-        // even if the socket fails at some point, we need to keep reading from
-        // the ring buffer to leave it in a consistent state
-        if(1 == failed)
+        length -= toread;
+        if(failed)
+        {
             error("Error on outgoing socket. Discarding %zu bytes of an"
                     "outgoing packet of size %zu\n", length, totallength);
-        length -= toread;
+            // read and discard the rest of the message from the ring buffer to
+            // leave it in a consistent state
+            char c;
+            while(length--)
+                rb_read_from_buffer(rb, &c, 1);
+        }
     }
     if (ret < 0)
     {
