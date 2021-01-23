@@ -492,7 +492,7 @@ static int netsend_dosend(t_netsend *x, int sockfd, int argc, t_atom *argv)
             socklen_t addrlen = (x->x_server.ss_family == AF_INET6 ?
                 sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in));
 #ifdef THREADED_IO
-            res = sys_sendto(sockfd, bp, length-sent, 0, &x->x_server, addrlen);
+            res = sys_sendto(sockfd, bp, length-sent, 0, (struct sockaddr *)&x->x_server, addrlen);
 #else // THREADED_IO
             res = (int)sendto(sockfd, bp, length-sent, 0,
                 (struct sockaddr *)&x->x_server, addrlen);
@@ -500,7 +500,7 @@ static int netsend_dosend(t_netsend *x, int sockfd, int argc, t_atom *argv)
         }
         else
 #ifdef THREADED_IO
-            res = sys_sendto(sockfd, bp, length-sent, 0, NULL, 0);
+            res = sys_send(sockfd, bp, length-sent, 0);
 #else // THREADED_IO
             res = (int)send(sockfd, bp, length-sent, 0);
 #endif // THREADED_IO

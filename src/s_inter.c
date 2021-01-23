@@ -284,9 +284,9 @@ static void sendrb_flush_and_resize(ring_buffer* rb, int should_lock, int mult)
 }
 
 // A sendto() that writes to a ring_buffer and is real-time safe
-static ssize_t rb_sendto(ring_buffer* rb, int socket, const void *buffer, size_t length, int flags, void* addr, size_t addrlen)
+static ssize_t rb_sendto(ring_buffer* rb, int socket, const void *buffer, size_t length, int flags, const struct sockaddr *addr, socklen_t addrlen)
 {
-    //printf("rb_sendto: fd: %d, %zu, rb: %p \"%s\"\n", socket, length, *rb, (char*)buffer);
+    //printf("rb_sendto: fd: %d, %zu, rb: %p, addrlen: %u \n", socket, length, rb, addrlen);
     size_t maxLength = rb_available_to_write(rb);
     size_t desiredLength = sizeof(size_t) + length;
     size_t actualLength = desiredLength <= maxLength ? desiredLength : maxLength;
@@ -300,7 +300,7 @@ static ssize_t rb_sendto(ring_buffer* rb, int socket, const void *buffer, size_t
     rb_write_to_buffer(rb, 5,
             (char*)&socket, sizeof(socket),
             (char*)&addrlen, sizeof(addrlen),
-            addr, addrlen,
+            addr, (size_t)addrlen,
             (char*)&length, sizeof(length),
             buffer, length
         );
@@ -314,11 +314,16 @@ ssize_t rb_send(ring_buffer* rb, int socket, const void *buffer, size_t length, 
 }
 
 // a drop-in replacement for sendto(), exposed for public use, safe to call from a real-time thread
-ssize_t sys_sendto(int sockfd, const void *buf, size_t len, int flags, void* addr, size_t addrlen)
+ssize_t sys_sendto(int sockfd, const void *buf, size_t len, int flags, const struct sockaddr *dest_addr, socklen_t dest_len)
 {
     if(rbsend_init())
         return -1;
-    return rb_sendto(pd_this->pd_inter->i_rbsend, sockfd, buf, len, flags, addr, addrlen);
+    return rb_sendto(pd_this->pd_inter->i_rbsend, sockfd, buf, len, flags, dest_addr, dest_len);
+}
+
+ssize_t sys_send(int sockfd, const void *buf, size_t len, int flags)
+{
+    return sys_sendto(sockfd, buf, len, flags, NULL, 0);
 }
 
 static void gui_failed(const char* s);
@@ -330,7 +335,7 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
     size_t length, totallength;
     char* buf = pd_this->pd_inter->i_iothreadbuf;
     int bufsize = pd_this->pd_inter->i_iothreadbufsize;
-    size_t addrlen;
+    socklen_t addrlen;
     struct sockaddr rbaddr;
     struct sockaddr* addr;
     if(rb_read_from_buffer(rb, (char*)&socket, sizeof(socket)) < 0)
@@ -353,6 +358,7 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
         error("we should not be here 3");
         return -1;
     }
+    //printf("dosendone: fd: %d, length: %zu, addrlen: %u\n", socket, totallength, addrlen);
     if(addrlen)
         addr = &rbaddr;
     else
@@ -409,7 +415,7 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
         if(EPIPE == errno && ignoreSigFd == socket) {
             printf ("EPIPE on %d\n", socket);
         } else {
-            fprintf(stderr, "failed sendto(%d, %p, %lu, %d, %p, %lu) call: %d %s\n", socket, buf, length, flags, addr, addrlen, errno, strerror(errno));
+            fprintf(stderr, "failed sendto(%d, %p, %lu, %d, %p, %u) call: %d %s\n", socket, buf, length, flags, addr, addrlen, errno, strerror(errno));
             ring_buffer* rbrmfdsend = pd_this->pd_inter->i_rbrmfdsend;
             if(rbrmfdsend)
                 rb_write_to_buffer(rbrmfdsend, 1, &socket, sizeof(socket));
