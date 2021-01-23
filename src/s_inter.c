@@ -283,12 +283,19 @@ static void sendrb_flush_and_resize(ring_buffer* rb, int should_lock, int mult)
         sys_unlockio();
 }
 
+struct rb_sendto_msg {
+    int socket;
+    size_t length;
+    int flags;
+    socklen_t addrlen;
+};
+
 // A sendto() that writes to a ring_buffer and is real-time safe
 static ssize_t rb_sendto(ring_buffer* rb, int socket, const void *buffer, size_t length, int flags, const struct sockaddr *addr, socklen_t addrlen)
 {
-    //printf("rb_sendto: fd: %d, %zu, rb: %p, addrlen: %u \n", socket, length, rb, addrlen);
+    //printf("rb_sendto: rb: %p, fd: %d, length: %zu, flags: %d, addrlen: %u \n", rb, socket, length, flags, addrlen);
     size_t maxLength = rb_available_to_write(rb);
-    size_t desiredLength = sizeof(size_t) + length;
+    size_t desiredLength = sizeof(socket) + sizeof(flags) + sizeof(addrlen) + addrlen + sizeof(length) + length;
     size_t actualLength = desiredLength <= maxLength ? desiredLength : maxLength;
     if(actualLength < desiredLength)
     {
@@ -297,11 +304,15 @@ static ssize_t rb_sendto(ring_buffer* rb, int socket, const void *buffer, size_t
         // then send out the new data
         return sendto(socket, buffer, length, 0, addr, addrlen);
     }
-    rb_write_to_buffer(rb, 5,
-            (char*)&socket, sizeof(socket),
-            (char*)&addrlen, sizeof(addrlen),
+    struct rb_sendto_msg m = {
+        .socket = socket,
+        .length = length,
+        .flags = flags,
+        .addrlen = addrlen,
+    };
+    rb_write_to_buffer(rb, 3,
+            (char*)&m, sizeof(m),
             addr, (size_t)addrlen,
-            (char*)&length, sizeof(length),
             buffer, length
         );
     return actualLength;
@@ -331,46 +342,38 @@ static void gui_failed(const char* s);
 static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
 {
     int ret;
-    int socket;
-    size_t length, totallength;
+    size_t length;
     char* buf = pd_this->pd_inter->i_iothreadbuf;
     int bufsize = pd_this->pd_inter->i_iothreadbufsize;
-    socklen_t addrlen;
     struct sockaddr rbaddr;
     struct sockaddr* addr;
-    if(rb_read_from_buffer(rb, (char*)&socket, sizeof(socket)) < 0)
+    int flags;
+    struct rb_sendto_msg m;
+    if(rb_read_from_buffer(rb, (char*)&m, sizeof(m)) < 0)
     {
         // no message to retrieve
         return 0;
     }
-    if(rb_read_from_buffer(rb, (char*)&addrlen, sizeof(addrlen)) < 0)
+    //printf("dosendone: fd: %d, length: %zu, flags: %d, addrlen: %u\n", m.socket, m.length, m.flags, m.addrlen);
+    if(m.addrlen)
     {
-        error("we should not be here 1");
-        return -1;
-    }
-    if(rb_read_from_buffer(rb, (char*)&rbaddr, addrlen) < 0)
-    {
-        error("we should not be here 2");
-        return -1;
-    }
-    if(rb_read_from_buffer(rb, (char*)&totallength, sizeof(length)) < 0)
-    {
-        error("we should not be here 3");
-        return -1;
-    }
-    //printf("dosendone: fd: %d, length: %zu, addrlen: %u\n", socket, totallength, addrlen);
-    if(addrlen)
+        if(rb_read_from_buffer(rb, (char*)&rbaddr, m.addrlen) < 0)
+        {
+            error("we should not be here 1");
+            return -1;
+        }
         addr = &rbaddr;
+    }
     else
         addr = NULL;
-    int flags = 0;
+    flags = m.flags;
 #ifdef MSG_NOSIGNAL
     if(ignoreSigFd == socket)
-        flags = MSG_NOSIGNAL;
+        flags |= MSG_NOSIGNAL;
 #endif // MSG_NOSIGNAL
     ret = 0;
     int failed = 0;
-    length = totallength;
+    length = m.length;
     while(!failed && length)
     {
         // this loop processes boh TCP and UDP packets.
@@ -382,7 +385,7 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
         int toread = bufsize < length ? bufsize : length;
         if(rb_read_from_buffer(rb, buf, toread) < 0)
         {
-            error("we should not be here 4");
+            error("we should not be here 2");
             return -1;
         }
         int sent = 0;
@@ -391,7 +394,7 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
             // do multiple writes here
             // TCP: addrlen will have been set to 0 and addr to NULL, so this
             // is equivalent to send()
-            ret = sendto(socket, buf, toread, flags, addr, addrlen);
+            ret = sendto(m.socket, buf, toread, flags, addr, m.addrlen);
             if(ret < 0)
                 failed = 1;
             else
@@ -401,7 +404,7 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
         if(failed)
         {
             error("Error on outgoing socket. Discarding %zu bytes of an"
-                    "outgoing packet of size %zu\n", length, totallength);
+                    "outgoing packet of size %zu\n", length, m.length);
             // read and discard the rest of the message from the ring buffer to
             // leave it in a consistent state
             char c;
@@ -412,16 +415,16 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
     if (ret < 0)
     {
         // if it wasn't ignored, the program would crash in sendto()
-        if(EPIPE == errno && ignoreSigFd == socket) {
-            printf ("EPIPE on %d\n", socket);
+        if(EPIPE == errno && ignoreSigFd == m.socket) {
+            printf ("EPIPE on %d\n", m.socket);
         } else {
-            fprintf(stderr, "failed sendto(%d, %p, %lu, %d, %p, %u) call: %d %s\n", socket, buf, length, flags, addr, addrlen, errno, strerror(errno));
+            fprintf(stderr, "failed sendto(%d, %p, %lu, %d, %p, %u) call: %d %s\n", m.socket, buf, m.length, flags, addr, m.addrlen, errno, strerror(errno));
             ring_buffer* rbrmfdsend = pd_this->pd_inter->i_rbrmfdsend;
             if(rbrmfdsend)
                 rb_write_to_buffer(rbrmfdsend, 1, &socket, sizeof(socket));
             else
-                printf("rbrmfdsend is not inited. Cannot delete fd %d\n", socket);
-            if(socket == pd_this->pd_inter->i_guisock)
+                printf("rbrmfdsend is not inited. Cannot delete fd %d\n", m.socket);
+            if(m.socket == pd_this->pd_inter->i_guisock)
                 gui_failed("pd-to-gui socket");
         }
     }
