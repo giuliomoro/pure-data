@@ -683,7 +683,6 @@ static int poll_fds()
     ssize_t ret;
     struct timeval timout = {0}; // making this timeout longer would be more efficient (by avoiding spurious wakeups), but it would needlessly postpone writes
     int i;
-    t_fdpoll *fp;
     if (pd_this->pd_inter->i_nfdpoll)
     {
         fd_set readset;
@@ -718,8 +717,12 @@ static int poll_fds()
                     fprintf(stderr, "Throttling read on fd %d\n", fd);
                     continue;
                 }
-                // we adapted socketreceiver_read and netsend_readbin to use
-                // rbskt_recv}from} instead of recv{from}. So here we are only
+                // UDP: bufsize is always large enough for the largest UDP packet
+                // TCP: packets may be larger, but we can split them at
+                // arbitrary points
+                size = size < bufsize ? size : bufsize;
+                // rt-compliant pollfn functions will call
+                // rbskt_recv{from} instead of recv{from}. So here we are only
                 // reading from the socket and making the data available
                 // through rbskt_recv{from}
                 struct sockaddr_storage fromaddr;
