@@ -10,8 +10,6 @@ in future releases.  The public (stable) API is in m_pd.h. */
 
 /* in s_path.c */
 
-#include <sys/socket.h> // struct sockaddr, socklen_t
-
 typedef struct _namelist    /* element in a linked list of stored strings */
 {
     struct _namelist *nl_next;  /* next in list */
@@ -176,13 +174,22 @@ typedef void (*t_socketreceivefn)(void *x, t_binbuf *b);
     /* from addr sockaddr_storage struct, optional */
 typedef void (*t_socketfromaddrfn)(void *x, const void *fromaddr);
 
+typedef struct _socketprivate t_socketprivate;
+typedef struct _socket {
+	int sk_fd;
+	t_socketprivate* sk_p;
+} t_socket;
+
+typedef void (*t_sockrecvfn)(void *ptr, t_socket* sock);
+typedef void (*t_socksenderrfn)(void *ptr, t_socket* sock, int err);
+
 EXTERN t_socketreceiver *socketreceiver_new(void *owner,
     t_socketnotifier notifier, t_socketreceivefn socketreceivefn, int udp);
 EXTERN void socketreceiver_read(t_socketreceiver *x, int fd);
 EXTERN void socketreceiver_set_fromaddrfn(t_socketreceiver *x,
     t_socketfromaddrfn fromaddrfn);
-EXTERN void socketreceiver_set_threaded(t_socketreceiver *x, int fd,
-    int threaded);
+EXTERN t_socket* socketreceiver_register(t_socketreceiver *x, int fd,
+    int threaded, t_socksenderrfn senderrfn);
 EXTERN void sys_sockerror(const char *s);
 EXTERN void sys_closesocket(int fd);
 
@@ -193,18 +200,45 @@ EXTERN void sys_rmpollfn(int fd);
 /* tells whether Pd has capabilities for threaded I/O */
 int sys_hasthreadedio();
 
-#define t_rbskt struct _rbskt
-/* Functions related to threaded I/O.
- * They are all NOP if sys_hasthreadedio() returns false */
-typedef void (*t_fdsendrmfn)(void *ptr);
-EXTERN void sys_addpollrb(int fd, int preserve_boundaries);
-EXTERN t_rbskt* sys_getpollrb(int fd);
-void sys_addsendfdrmfn(int sockfd, t_fdsendrmfn fn, void* x);
-ssize_t sys_sendto(int sockfd, const void *buf, size_t len, int flags, const struct sockaddr *dest_addr, socklen_t dest_len);
-ssize_t sys_send(int sockfd, const void *buf, size_t len, int flags);
-EXTERN int rbskt_recv(t_rbskt* rbskt, void* buf, size_t length, int nothing);
-EXTERN int rbskt_recvfrom(t_rbskt* rbskt, void* buf, size_t buflen, int nothing, struct sockaddr *address, socklen_t* address_len);
-EXTERN int rbskt_bytes_available(t_rbskt* rbskt);
+/* Functions related to threaded I/O. */
+// register a socket for I/O
+// arguments:
+//   fd: the socket file descripter
+//   udp: is it a udp socket or not? (Used uniquely to preserve message boundaries or not)
+//   threaded: set to 1 to enable threaded I/O (if supported by Pd)
+//   user: user data passed to callback functions
+//   recvfn: a function which is called when the t_socket is ready for reading.
+//       sys_recv{from} should then be called on it
+//   senderrfn: a function which is called when threaded is true and a
+//       send{to}() fails. It must be provided when threaded is true and
+//       sys_send{to} will be called on this socket_t
+// returns:
+//    an opaque pointer to be used in sys_send, sys_sendto, sys_recv,
+//    sys_recvfrom and sys_bytes_available
+// The behaviour of the functions using the returned t_socket* is
+// feature-invariant, that is their behaviour depends uniquely on the arguments
+// passed here, regardless of whether Pd has threaded I/O support or not.
+EXTERN t_socket* sys_registersocket(int fd, int udp, int threaded, void *user, t_sockrecvfn recvfn, t_socksenderrfn senderrfn);
+
+// unregister socket. Returns the bare file descriptor
+EXTERN int sys_unregistersocket(t_socket *x);
+
+// drop-in replacements for recv{from} (internally fall back to recv/recvfrom if threaded is disabled)
+// if threaded is enabled, the flags argument is ignored
+EXTERN ssize_t sys_recv(t_socket *x, void* buf, size_t length, int flags);
+EXTERN ssize_t sys_recvfrom(t_socket *x, void* buf, size_t buflen, int flags, void *address, size_t* address_len);
+
+// drop-in replacement for `socket_bytes_available()`, falls back to it if
+// threaded is disabled
+EXTERN int sys_bytes_available(t_socket *x);
+
+// drop-in replacements for send{to}. If this socket was marked as `threaded`,
+// it will always return success and errors will be handled via the
+// rmfn registered above. If threaded I/O is disabled for this socket AND no
+// rmfn is provided, it will return the return value of send{to}()
+ssize_t sys_sendto(t_socket *x, const void *buf, size_t len, int flags, const void *dest_addr, size_t dest_len);
+ssize_t sys_send(t_socket *x, const void *buf, size_t len, int flags);
+
 /* return true if it did read any data from any socket. */
 EXTERN int sys_doio(t_pdinstance* pd_that);
 EXTERN void sys_dontmanageio(int status);
