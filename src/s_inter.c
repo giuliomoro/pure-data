@@ -602,7 +602,7 @@ static int rb_dosendone(ring_buffer* rb, const int ignoreSigFd)
         addr = NULL;
     flags = m.flags;
 #ifdef MSG_NOSIGNAL
-    if(ignoreSigFd == socket)
+    if(ignoreSigFd == m.socket)
         flags |= MSG_NOSIGNAL;
 #endif // MSG_NOSIGNAL
     ret = 0;
