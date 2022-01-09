@@ -171,6 +171,7 @@ pd_SOURCES_core = \
     x_vexp.c \
     x_vexp_fun.c \
     x_vexp_if.c \
+    ringbuffer.c \
     $(empty)
 
 pd_SOURCES_standalone = \
