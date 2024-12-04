@@ -14,8 +14,8 @@
 #include "m_pd.h"
 #include "m_imp.h"
 #include "g_canvas.h"
+#include "s_stuff.h"
 #include <stdarg.h>
-#define DEFDACBLKSIZE 64    /* from s_stuff.h - LATER make this dynamic */
 
 extern t_class *vinlet_class, *voutlet_class, *canvas_class, *text_class;
 
@@ -240,7 +240,7 @@ int canvas_getsignallength(t_canvas *x)
             if (g->g_pd == block_class &&
                 ((t_block *)g)->x_calcsize)
                     return (((t_block *)g)->x_calcsize);
-    return (DEFDACBLKSIZE);
+    return (DEFDACBLKSIZE); /* from s_stuff.h - LATER make this dynamic */
 }
 
 static void *switch_new(t_floatarg fvecsize, t_floatarg foverlap,
